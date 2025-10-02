@@ -8,9 +8,6 @@ defaults:
     shell: bash
 
 on:
-  #  release:
-  #    types: [published]
-  #    branches: [master]
   push:
     tags:
       - "v*.*.*"
@@ -67,8 +64,6 @@ jobs:
       - name: Deploy documentation
         run: poetry run mkdocs gh-deploy --force
   compute:
-    # Workaround to be able to use variables in matrix.
-    # See: https://stackoverflow.com/questions/74072206/github-actions-use-variables-in-matrix-definition
     runs-on: ubuntu-24.04
     outputs:
       ASSET_EXTENSION: ${{ env.ASSET_EXTENSION }}
@@ -97,44 +92,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: "macos-13"
-            TARGET: "macos-13"
-            OS_ARCH: ${{needs.compute.outputs.ARCH_MACOS_X64}}
-            CMD_BUILD: >
-              brew install create-dmg &&
-              source $VENV &&
-              poetry run make gui-macos-dmg APP_NAME=${{needs.compute.outputs.OUT_NAME_FILE}} &&
-              cd dist &&
-              zip -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} ${{needs.compute.outputs.OUT_NAME_FILE}}.dmg -x "*.DS_Store" &&
-              cd ..
-          - os: "macos-14"
-            TARGET: "macos-14 M1"
-            OS_ARCH: ${{needs.compute.outputs.ARCH_MACOS_ARM64}}
-            CMD_BUILD: >
-              brew install create-dmg &&
-              source $VENV &&
-              poetry run make gui-macos-dmg APP_NAME=${{needs.compute.outputs.OUT_NAME_FILE}} &&
-              cd dist &&
-              zip -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_MACOS_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} ${{needs.compute.outputs.OUT_NAME_FILE}}.dmg -x "*.DS_Store" &&
-              cd ..
-          - os: "ubuntu-24.04"
-            TARGET: "ubuntu-22.04"
-            OS_ARCH: ${{needs.compute.outputs.ARCH_LINUX_X64}}
-            CMD_BUILD: >
-              source $VENV &&
-              poetry run make gui-linux APP_NAME=${{needs.compute.outputs.OUT_NAME_FILE}} &&
-              cd dist &&
-              zip -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} ${{needs.compute.outputs.OUT_NAME_FILE}} &&
-              cd ..
-          - os: "ubuntu-24.04-arm"
-            TARGET: "ubuntu-22.04-arm"
-            OS_ARCH: ${{needs.compute.outputs.ARCH_LINUX_ARM64}}
-            CMD_BUILD: >
-              source $VENV &&
-              poetry run make gui-linux APP_NAME=${{needs.compute.outputs.OUT_NAME_FILE}} &&
-              cd dist &&
-              zip -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_LINUX_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} ${{needs.compute.outputs.OUT_NAME_FILE}} &&
-              cd ..
+          # All other OS platforms are commented out
+          # - os: "macos-13"
+          # ...
+          # - os: "macos-14"
+          # ...
+          # - os: "ubuntu-24.04"
+          # ...
+          # - os: "ubuntu-24.04-arm"
+          # ...
           - os: "windows-2022"
             TARGET: "windows-2022"
             OS_ARCH: ${{needs.compute.outputs.ARCH_WINDOWS_X64}}
@@ -145,16 +111,8 @@ jobs:
               cd dist &&
               zip -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_WINDOWS_X64}}${{needs.compute.outputs.ASSET_EXTENSION}} ${{needs.compute.outputs.OUT_NAME_FILE}} &&
               cd ..
-          - os: "windows-11-arm"
-            TARGET: "windows-11-arm"
-            OS_ARCH: ${{needs.compute.outputs.ARCH_WINDOWS_ARM64}}
-            CMD_BUILD: >
-              choco install zip make -y &&
-              source $VENV &&
-              poetry run make gui-windows APP_NAME=${{needs.compute.outputs.OUT_NAME_FILE}} &&
-              cd dist &&
-              zip -r ${{needs.compute.outputs.OUT_NAME_FILE}}_${{needs.compute.outputs.ARCH_WINDOWS_ARM64}}${{needs.compute.outputs.ASSET_EXTENSION}} ${{needs.compute.outputs.OUT_NAME_FILE}} &&
-              cd ..
+          # - os: "windows-11-arm"
+          # ...
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out
@@ -163,7 +121,7 @@ jobs:
         uses: ./.github/actions/setup-poetry-env
       - name: Build with pyinstaller for ${{matrix.TARGET}}
         run: ${{matrix.CMD_BUILD}}
-      - name: Upload Release Asset
+      - name: Upload Release Asset (for official releases)
         if: startsWith(github.ref, 'refs/tags/')
         id: upload-release-asset
         uses: softprops/action-gh-release@v2
@@ -172,3 +130,9 @@ jobs:
         with:
           files: |
             ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}${{needs.compute.outputs.ASSET_EXTENSION}}
+      - name: Upload Build Artifact (for test builds)
+        if: github.ref == 'refs/heads/test-build'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.OS_ARCH }}-Build
+          path: ./dist/${{needs.compute.outputs.OUT_NAME_FILE}}_${{matrix.OS_ARCH}}${{needs.compute.outputs.ASSET_EXTENSION}}

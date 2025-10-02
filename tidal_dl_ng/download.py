@@ -4,7 +4,6 @@
 import os
 import requests
 import threading
-from aigpy.path import Path
 
 
 class DownloadTool(object):

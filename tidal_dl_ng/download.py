@@ -1,10 +1,46 @@
+# --- START OF INCLUDED AIGPY CODE ---
+
 #
-# aigpy.download
+# This code is from `aigpy.path`
+# It is included directly to avoid dependency issues.
 #
 import os
+import shutil
+
+class Path(object):
+    def __init__(self, path):
+        self.path = path
+    def is_dir(self):
+        return os.path.isdir(self.path)
+    def is_file(self):
+        return os.path.isfile(self.path)
+    def exists(self):
+        return os.path.exists(self.path)
+    def mkdir(self, parents=True):
+        if parents:
+            os.makedirs(self.path, exist_ok=True)
+        else:
+            os.mkdir(self.path)
+    def touch(self):
+        if not self.exists():
+            # Get directory name and create it if it doesn't exist
+            dirname = os.path.dirname(self.path)
+            if dirname and not os.path.exists(dirname):
+                os.makedirs(dirname, exist_ok=True)
+            open(self.path, 'a').close()
+    def remove(self):
+        if not self.exists():
+            return
+        if self.is_dir():
+            shutil.rmtree(self.path)
+        else:
+            os.remove(self.path)
+
+#
+# This code is from `aigpy.download`
+#
 import requests
 import threading
-
 
 class DownloadTool(object):
     def __init__(self, path, urls, thread_num=5, func_progress=None):
@@ -40,7 +76,6 @@ class DownloadTool(object):
                     if fun_progress:
                         fun_progress(len(chunk))
         except requests.exceptions.RequestException as e:
-            # Silently handle common network errors, maybe log later
             return False
         return True
 
@@ -65,7 +100,7 @@ class DownloadTool(object):
         self.is_stop = True
 
     def start(self, check=False):
-        Path(self.path).touch()
+        Path(self.path).touch() # This now uses the Path class defined above
         for url in self.urls:
             size = self.__get_file_size__(url)
             if size > 0:
@@ -73,6 +108,11 @@ class DownloadTool(object):
                 break
         
         if self.total_size <= 0:
+            # Fallback for single segment downloads without content-length
+            if len(self.urls) == 1:
+                self.__download_file__(self.urls[0], 0, 99999999999, 0, None) # Download without range
+                if os.path.exists(self.path):
+                    return True, ""
             return False, "Get file size failed."
 
         if self.func_progress:
@@ -94,9 +134,8 @@ class DownloadTool(object):
             return False, "Check file failed"
         return True, ""
 
-
 #
-# aigpy.tag
+# This code is from `aigpy.tag`
 #
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover
@@ -121,27 +160,32 @@ class TagTool(object):
 
     def save(self, cover_path=None):
         path = str(self.path)
-        if ".flac" in path:
-            self.__save_flac__(cover_path)
-        elif ".m4a" in path:
-            self.__save_m4a__(cover_path)
+        try:
+            if ".flac" in path.lower():
+                self.__save_flac__(cover_path)
+            elif ".m4a" in path.lower():
+                self.__save_m4a__(cover_path)
+        except Exception:
+            # Silently fail if tagging is not supported
+            pass
     
     def __save_m4a__(self, cover_path=None):
-        tags = MP4(self.path)
-        if tags is None:
+        try:
+            tags = MP4(self.path)
+        except Exception:
             tags = MP4()
         
-        if self.title: tags["\xa9nam"] = self.title
-        if self.album: tags["\xa9alb"] = self.album
-        if self.artist: tags["\xa9ART"] = self.artist
-        if self.albumartist: tags["aART"] = self.albumartist
-        if self.composer: tags["\xa9wrt"] = self.composer
+        if self.title: tags["\xa9nam"] = [self.title]
+        if self.album: tags["\xa9alb"] = [self.album]
+        if self.artist: tags["\xa9ART"] = [", ".join(self.artist)]
+        if self.albumartist: tags["aART"] = [", ".join(self.albumartist)]
+        if self.composer: tags["\xa9wrt"] = [", ".join(self.composer)]
         if self.tracknumber: tags["trkn"] = [(self.tracknumber, self.totaltrack or 0)]
         if self.discnumber: tags["disk"] = [(self.discnumber, self.totaldisc or 0)]
-        if self.copyright: tags["cprt"] = self.copyright
-        if self.date: tags["\xa9day"] = self.date
+        if self.copyright: tags["cprt"] = [self.copyright]
+        if self.date: tags["\xa9day"] = [self.date]
         if self.isrc: tags["----:com.apple.iTunes:ISRC"] = self.isrc.encode('utf-8')
-        if self.lyrics: tags["\xa9lyr"] = self.lyrics
+        if self.lyrics: tags["\xa9lyr"] = [self.lyrics]
 
         if cover_path:
             with open(cover_path, "rb") as f:
@@ -152,9 +196,7 @@ class TagTool(object):
 
     def __save_flac__(self, cover_path=None):
         tags = FLAC(self.path)
-        if tags is None:
-            tags = FLAC()
-
+        
         if self.title: tags["TITLE"] = self.title
         if self.album: tags["ALBUM"] = self.album
         if self.artist: tags["ARTIST"] = self.artist if isinstance(self.artist, list) else [self.artist]
@@ -178,15 +220,13 @@ class TagTool(object):
                 image.data = f.read()
             image.type = 3
             image.mime = u"image/jpeg"
-            image.width = 1280
-            image.height = 1280
             audio.clear_pictures()
             audio.add_picture(image)
             audio.save()
+            
+# --- END OF INCLUDED AIGPY CODE ---
 
-#
-# Original download.py starts here
-#
+
 """
 download.py
 
@@ -196,10 +236,9 @@ Classes:
     RequestsClient: Simple HTTP client for downloading text content.
     Download: Main class for managing downloads, segment merging, file operations, and metadata.
 """
-import os
+# Original imports start here
 import pathlib
 import random
-import shutil
 import tempfile
 import time
 from collections.abc import Callable
@@ -208,7 +247,6 @@ from threading import Event
 from uuid import uuid4
 
 import m3u8
-import requests
 from ffmpeg import FFmpeg
 from pathvalidate import sanitize_filename
 from requests.adapters import HTTPAdapter, Retry

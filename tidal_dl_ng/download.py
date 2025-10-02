@@ -14,6 +14,7 @@ import random
 import shutil
 import tempfile
 import time
+import aigpy
 from collections.abc import Callable
 from concurrent import futures
 from threading import Event
@@ -804,30 +805,103 @@ class Download:
         is_parent_album: bool,
         media_stream: Stream | None,
     ) -> bool:
-        """Perform the actual download and processing.
-
-        Args:
-            media (Track | Video): Media item.
-            path_media_dst (pathlib.Path): Destination file path.
-            stream_manifest (StreamManifest | None): Stream manifest.
-            do_flac_extract (bool): Whether to extract FLAC.
-            is_parent_album (bool): Whether this is a parent album.
-            media_stream (Stream | None): Media stream.
-
-        Returns:
-            bool: Whether download was successful.
         """
-        # Create a temp directory and file.
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_path_dir:
-            tmp_path_file: pathlib.Path = pathlib.Path(tmp_path_dir) / str(uuid4())
-            tmp_path_file.touch()
+        【这是你的新版下载逻辑】
+        使用 aigpy 进行并行下载和元数据写入。
+        """
+        # 你的逻辑主要针对音轨，如果不是Track，就直接返回失败
+        if not isinstance(media, Track):
+            self.fn_logger.error("Custom download logic currently only supports audio tracks.")
+            return False
 
-            # Download media.
-            result_download, tmp_path_file = self._download(
-                media=media, stream_manifest=stream_manifest, path_file=tmp_path_file
-            )
+        track_id = media.id
+        track_info_str = f"{media.name} - {media.artist.name if media.artist else 'Unknown Artist'}"
+        
+        # 从 stream_manifest 获取必要信息
+        stream_urls = stream_manifest.get_urls()
+        is_encrypted = stream_manifest.is_encrypted
+        encryption_key = stream_manifest.encryption_key
 
-            if not result_download:
+        # 创建一个临时目录来存放所有文件
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+            temp_dir_path = pathlib.Path(tmp_dir)
+            try:
+                # 1. 【你的逻辑】使用 aigpy 并行下载
+                self.fn_logger.info(f"Starting parallel download for {len(stream_urls)} segments using aigpy...")
+                segment_paths = {}
+                with futures.ThreadPoolExecutor(max_workers=10) as executor:
+                    future_to_url = {}
+                    for i, url in enumerate(stream_urls):
+                        segment_path = temp_dir_path / f"segment_{i:04d}"
+                        future = executor.submit(aigpy.download.DownloadTool(str(segment_path), [url]).start, False)
+                        future_to_url[future] = (i, segment_path)
+
+                    for future in futures.as_completed(future_to_url):
+                        index, path = future_to_url[future]
+                        check, err = future.result()
+                        if not check:
+                            raise Exception(f"Segment {index} download failed: {err}")
+                        segment_paths[index] = path
+                self.fn_logger.info("All segments downloaded successfully.")
+
+                # 2. 【你的逻辑】合并文件
+                self.fn_logger.info("Merging segments...")
+                merged_path = temp_dir_path / f"{track_id}.merged"
+                with open(merged_path, 'wb') as f_dest:
+                    for i in range(len(stream_urls)):
+                        segment_path = segment_paths.get(i)
+                        if not segment_path:
+                            raise Exception(f"Missing segment {i} for merging.")
+                        with open(segment_path, 'rb') as f_src:
+                            shutil.copyfileobj(f_src, f_dest)
+                current_path = merged_path
+                
+                # 3. 【你的逻辑】解密
+                if is_encrypted:
+                    self.fn_logger.info("Decrypting file...")
+                    decrypted_path = temp_dir_path / f"{track_id}.decrypted"
+                    key, nonce = decrypt_security_token(encryption_key)
+                    decrypt_file(current_path, decrypted_path, key, nonce)
+                    current_path = decrypted_path
+                    self.fn_logger.info("Decryption successful.")
+
+                # 4. 【你的逻辑】提取FLAC (调用项目自身的方法)
+                if do_flac_extract:
+                    self.fn_logger.info("Extracting FLAC from M4A container...")
+                    # 这里我们调用项目自带的、更可靠的 _extract_flac 方法
+                    extracted_path = self._extract_flac(current_path)
+                    if not extracted_path or not extracted_path.exists():
+                        raise Exception("FLAC extraction failed.")
+                    current_path = extracted_path
+                
+                # 5. 【你的逻辑】写入元数据 (使用 aigpy.tag)
+                self.fn_logger.info(f"Writing metadata for '{track_info_str}' using aigpy...")
+                tag_tool = aigpy.tag.TagTool(str(current_path))
+                tag_tool.album = media.album.name
+                tag_tool.title = media.name
+                if not aigpy.string.isNull(media.version):
+                    tag_tool.title += ' (' + media.version + ')'
+                tag_tool.artist = [a.name for a in media.artists]
+                tag_tool.copyright = media.copyright
+                tag_tool.tracknumber = media.track_num
+                tag_tool.discnumber = media.volume_num
+                # 此处省略了contributor和composer的逻辑以简化
+                tag_tool.isrc = media.isrc
+                tag_tool.albumartist = [a.name for a in media.album.artists]
+                tag_tool.date = media.album.release_date.strftime('%Y-%m-%d') if media.album.release_date else None
+                tag_tool.totaldisc = media.album.num_volumes
+                
+                cover_url = media.album.image(1280)
+                tag_tool.save(cover_url)
+                self.fn_logger.info("Metadata written successfully.")
+
+                # 6. 移动最终文件到目标路径
+                shutil.move(current_path, path_media_dst)
+                self.fn_logger.info(f"Downloaded item '{track_info_str}'.")
+                return True
+
+            except Exception as e:
+                self.fn_logger.exception(f"Download process failed for '{track_info_str}': {e}")
                 return False
 
             # Convert video from TS to MP4

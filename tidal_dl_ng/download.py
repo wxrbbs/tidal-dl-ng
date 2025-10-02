@@ -1,3 +1,193 @@
+#
+# aigpy.download
+#
+import os
+import requests
+import threading
+from aigpy.path import Path
+
+
+class DownloadTool(object):
+    def __init__(self, path, urls, thread_num=5, func_progress=None):
+        self.path = path
+        self.urls = urls if isinstance(urls, list) else [urls]
+        self.total_size = 0
+        self.chunk_size = 1024 * 1024
+        self.thread_num = thread_num
+        self.func_progress = func_progress
+        self.is_stop = False
+
+    def __get_file_size__(self, url):
+        try:
+            response = requests.head(url, timeout=20)
+            if 'Content-Length' in response.headers:
+                return int(response.headers['Content-Length'])
+        except Exception:
+            pass
+        return 0
+
+    def __download_file__(self, url, start, end, thread_id, fun_progress):
+        try:
+            headers = {"Range": f"bytes={start}-{end}"}
+            response = requests.get(url, headers=headers, stream=True, timeout=(30, 120))
+            response.raise_for_status()
+            
+            with open(self.path, "rb+") as f:
+                f.seek(start)
+                for chunk in response.iter_content(chunk_size=self.chunk_size):
+                    if not chunk or self.is_stop:
+                        break
+                    f.write(chunk)
+                    if fun_progress:
+                        fun_progress(len(chunk))
+        except requests.exceptions.RequestException as e:
+            # Silently handle common network errors, maybe log later
+            return False
+        return True
+
+    def __run_thread__(self, url, start_pos, file_size, func_progress):
+        thread_list = []
+        part_size = file_size // self.thread_num
+
+        for i in range(self.thread_num):
+            start = start_pos + i * part_size
+            end = start + part_size - 1
+            if i == self.thread_num - 1:
+                end = start_pos + file_size - 1
+
+            t = threading.Thread(target=self.__download_file__, args=(url, start, end, i, func_progress))
+            t.start()
+            thread_list.append(t)
+
+        for t in thread_list:
+            t.join()
+
+    def stop(self):
+        self.is_stop = True
+
+    def start(self, check=False):
+        Path(self.path).touch()
+        for url in self.urls:
+            size = self.__get_file_size__(url)
+            if size > 0:
+                self.total_size = size
+                break
+        
+        if self.total_size <= 0:
+            return False, "Get file size failed."
+
+        if self.func_progress:
+            self.func_progress(0, self.total_size)
+        
+        c_size = 0
+        def func(size):
+            nonlocal c_size
+            c_size += size
+            if self.func_progress:
+                self.func_progress(c_size, self.total_size)
+
+        self.__run_thread__(self.urls[0], 0, self.total_size, func)
+
+        if self.is_stop:
+            return False, "Stop."
+
+        if check and c_size != self.total_size:
+            return False, "Check file failed"
+        return True, ""
+
+
+#
+# aigpy.tag
+#
+from mutagen.flac import FLAC, Picture
+from mutagen.mp4 import MP4, MP4Cover
+import base64
+
+class TagTool(object):
+    def __init__(self, path):
+        self.path = path
+        self.title = None
+        self.album = None
+        self.artist = None
+        self.albumartist = None
+        self.composer = None
+        self.tracknumber = None
+        self.discnumber = None
+        self.totaltrack = None
+        self.totaldisc = None
+        self.copyright = None
+        self.date = None
+        self.isrc = None
+        self.lyrics = None
+
+    def save(self, cover_path=None):
+        path = str(self.path)
+        if ".flac" in path:
+            self.__save_flac__(cover_path)
+        elif ".m4a" in path:
+            self.__save_m4a__(cover_path)
+    
+    def __save_m4a__(self, cover_path=None):
+        tags = MP4(self.path)
+        if tags is None:
+            tags = MP4()
+        
+        if self.title: tags["\xa9nam"] = self.title
+        if self.album: tags["\xa9alb"] = self.album
+        if self.artist: tags["\xa9ART"] = self.artist
+        if self.albumartist: tags["aART"] = self.albumartist
+        if self.composer: tags["\xa9wrt"] = self.composer
+        if self.tracknumber: tags["trkn"] = [(self.tracknumber, self.totaltrack or 0)]
+        if self.discnumber: tags["disk"] = [(self.discnumber, self.totaldisc or 0)]
+        if self.copyright: tags["cprt"] = self.copyright
+        if self.date: tags["\xa9day"] = self.date
+        if self.isrc: tags["----:com.apple.iTunes:ISRC"] = self.isrc.encode('utf-8')
+        if self.lyrics: tags["\xa9lyr"] = self.lyrics
+
+        if cover_path:
+            with open(cover_path, "rb") as f:
+                data = f.read()
+            tags["covr"] = [MP4Cover(data, imageformat=MP4Cover.FORMAT_JPEG)]
+        
+        tags.save(self.path)
+
+    def __save_flac__(self, cover_path=None):
+        tags = FLAC(self.path)
+        if tags is None:
+            tags = FLAC()
+
+        if self.title: tags["TITLE"] = self.title
+        if self.album: tags["ALBUM"] = self.album
+        if self.artist: tags["ARTIST"] = self.artist if isinstance(self.artist, list) else [self.artist]
+        if self.albumartist: tags["ALBUMARTIST"] = self.albumartist if isinstance(self.albumartist, list) else [self.albumartist]
+        if self.composer: tags["COMPOSER"] = self.composer
+        if self.tracknumber: tags["TRACKNUMBER"] = str(self.tracknumber)
+        if self.discnumber: tags["DISCNUMBER"] = str(self.discnumber)
+        if self.totaltrack: tags["TRACKTOTAL"] = str(self.totaltrack)
+        if self.totaldisc: tags["DISCTOTAL"] = str(self.totaldisc)
+        if self.copyright: tags["COPYRIGHT"] = self.copyright
+        if self.date: tags["DATE"] = self.date
+        if self.isrc: tags["ISRC"] = self.isrc
+        if self.lyrics: tags["LYRICS"] = self.lyrics
+
+        tags.save(self.path)
+
+        if cover_path:
+            audio = FLAC(self.path)
+            image = Picture()
+            with open(cover_path, "rb") as f:
+                image.data = f.read()
+            image.type = 3
+            image.mime = u"image/jpeg"
+            image.width = 1280
+            image.height = 1280
+            audio.clear_pictures()
+            audio.add_picture(image)
+            audio.save()
+
+#
+# Original download.py starts here
+#
 """
 download.py
 
@@ -7,14 +197,12 @@ Classes:
     RequestsClient: Simple HTTP client for downloading text content.
     Download: Main class for managing downloads, segment merging, file operations, and metadata.
 """
-
 import os
 import pathlib
 import random
 import shutil
 import tempfile
 import time
-import aigpy
 from collections.abc import Callable
 from concurrent import futures
 from threading import Event
@@ -833,7 +1021,7 @@ class Download:
                     future_to_url = {}
                     for i, url in enumerate(stream_urls):
                         segment_path = temp_dir_path / f"segment_{i:04d}"
-                        future = executor.submit(aigpy.download.DownloadTool(str(segment_path), [url]).start, False)
+                        future = executor.submit(DownloadTool(str(segment_path), [url]).start, False)
                         future_to_url[future] = (i, segment_path)
 
                     for future in futures.as_completed(future_to_url):
@@ -876,23 +1064,34 @@ class Download:
                 
                 # 5. 【你的逻辑】写入元数据 (使用 aigpy.tag)
                 self.fn_logger.info(f"Writing metadata for '{track_info_str}' using aigpy...")
-                tag_tool = aigpy.tag.TagTool(str(current_path))
+                tag_tool = TagTool(str(current_path))
                 tag_tool.album = media.album.name
                 tag_tool.title = media.name
-                if not aigpy.string.isNull(media.version):
-                    tag_tool.title += ' (' + media.version + ')'
+                
+                # Check for version attribute before using it
+                if hasattr(media, 'version') and media.version:
+                    tag_tool.title += f' ({media.version})'
+
                 tag_tool.artist = [a.name for a in media.artists]
                 tag_tool.copyright = media.copyright
                 tag_tool.tracknumber = media.track_num
                 tag_tool.discnumber = media.volume_num
-                # 此处省略了contributor和composer的逻辑以简化
                 tag_tool.isrc = media.isrc
                 tag_tool.albumartist = [a.name for a in media.album.artists]
                 tag_tool.date = media.album.release_date.strftime('%Y-%m-%d') if media.album.release_date else None
                 tag_tool.totaldisc = media.album.num_volumes
                 
+                # Handling cover art download
                 cover_url = media.album.image(1280)
-                tag_tool.save(cover_url)
+                cover_path = None
+                if cover_url:
+                    response = requests.get(cover_url)
+                    if response.status_code == 200:
+                        cover_path = temp_dir_path / 'cover.jpg'
+                        with open(cover_path, 'wb') as f:
+                            f.write(response.content)
+
+                tag_tool.save(cover_path)
                 self.fn_logger.info("Metadata written successfully.")
 
                 # 6. 移动最终文件到目标路径
@@ -903,8 +1102,6 @@ class Download:
             except Exception as e:
                 self.fn_logger.exception(f"Download process failed for '{track_info_str}': {e}")
                 return False
-
-            
 
     def _handle_metadata_and_extras(
         self,

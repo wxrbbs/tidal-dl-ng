@@ -1,3 +1,4 @@
+
 # 🔰 TIDAL Downloader Next Generation! (tidal-dl-ng)
 
 [![Release](https://img.shields.io/github/v/release/exislow/tidal-dl-ng)](https://img.shields.io/github/v/release/exislow/tidal-dl-ng)

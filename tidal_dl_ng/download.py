@@ -904,23 +904,7 @@ class Download:
                 self.fn_logger.exception(f"Download process failed for '{track_info_str}': {e}")
                 return False
 
-            # Convert video from TS to MP4
-            if isinstance(media, Video) and self.settings.data.video_convert_mp4:
-                tmp_path_file = self._video_convert(tmp_path_file)
-
-            # Extract FLAC from MP4 container using ffmpeg
-            if isinstance(media, Track) and self.settings.data.extract_flac and do_flac_extract:
-                tmp_path_file = self._extract_flac(tmp_path_file)
-
-            # Handle metadata, lyrics, and cover
-            self._handle_metadata_and_extras(media, tmp_path_file, path_media_dst, is_parent_album, media_stream)
-
-            self.fn_logger.info(f"Downloaded item '{name_builder_item(media)}'.")
-
-            # Move final file to the configured destination directory.
-            shutil.move(tmp_path_file, path_media_dst)
-
-            return True
+            
 
     def _handle_metadata_and_extras(
         self,

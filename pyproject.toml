@@ -42,6 +42,7 @@ typer = "^0.16.0"
 tidalapi = "^0.8.5"
 python-ffmpeg = "^2.0.12"
 pycryptodome = "^3.23.0"
+aigpy = "^2022.7.8.1"
 
 [project.optional-dependencies]
 gui = ["pyside6", "pyqtdarktheme-fork"]

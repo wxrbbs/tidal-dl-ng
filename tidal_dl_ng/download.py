@@ -434,12 +434,13 @@ class Download:
             try:
                 # Get file size and compute progress steps
                 r = requests.head(urls[0], timeout=REQUESTS_TIMEOUT_SEC)
-
+                r.raise_for_status()
                 total_size_in_bytes: int = int(r.headers.get("content-length", 0))
                 block_size = 1048576
                 progress_total = total_size_in_bytes / block_size
             finally:
-                r.close()
+                if 'r' in locals():
+                    r.close()
         else:
             raise ValueError
 
@@ -1036,6 +1037,21 @@ class Download:
         """
         # 你的逻辑主要针对音轨，如果不是Track，就直接返回失败
         if not isinstance(media, Track):
+            if isinstance(media, Video): # 保留原始的视频下载逻辑
+                with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_path_dir:
+                    tmp_path_file: pathlib.Path = pathlib.Path(tmp_path_dir) / str(uuid4())
+                    tmp_path_file.touch()
+                    result_download, tmp_path_file = self._download(
+                        media=media, stream_manifest=stream_manifest, path_file=tmp_path_file
+                    )
+                    if not result_download:
+                        return False
+                    if self.settings.data.video_convert_mp4:
+                        tmp_path_file = self._video_convert(tmp_path_file)
+                    
+                    self.fn_logger.info(f"Downloaded video '{name_builder_item(media)}'.")
+                    shutil.move(tmp_path_file, path_media_dst)
+                    return True
             self.fn_logger.error("Custom download logic currently only supports audio tracks.")
             return False
 
@@ -1093,19 +1109,25 @@ class Download:
                 # 4. 【你的逻辑】提取FLAC (调用项目自身的方法)
                 if do_flac_extract:
                     self.fn_logger.info("Extracting FLAC from M4A container...")
-                    # 这里我们调用项目自带的、更可靠的 _extract_flac 方法
                     extracted_path = self._extract_flac(current_path)
                     if not extracted_path or not extracted_path.exists():
                         raise Exception("FLAC extraction failed.")
                     current_path = extracted_path
                 
-                # 5. 【你的逻辑】写入元数据 (使用 aigpy.tag)
+                # 5. 【修正】确保文件有正确的扩展名，以便TagTool能识别
+                self.fn_logger.info("Ensuring correct file extension for tagging...")
+                final_extension = path_media_dst.suffix
+                path_with_extension = current_path.with_suffix(final_extension)
+                if current_path != path_with_extension:
+                    shutil.move(current_path, path_with_extension)
+                current_path = path_with_extension
+                
+                # 6. 【你的逻辑】写入元数据 (使用 aigpy.tag)
                 self.fn_logger.info(f"Writing metadata for '{track_info_str}' using aigpy...")
                 tag_tool = TagTool(str(current_path))
                 tag_tool.album = media.album.name
                 tag_tool.title = media.name
                 
-                # Check for version attribute before using it
                 if hasattr(media, 'version') and media.version:
                     tag_tool.title += f' ({media.version})'
 
@@ -1117,6 +1139,7 @@ class Download:
                 tag_tool.albumartist = [a.name for a in media.album.artists]
                 tag_tool.date = media.album.release_date.strftime('%Y-%m-%d') if media.album.release_date else None
                 tag_tool.totaldisc = media.album.num_volumes
+                tag_tool.totaltrack = media.album.num_tracks
                 
                 # Handling cover art download
                 cover_url = media.album.image(1280)
@@ -1131,7 +1154,7 @@ class Download:
                 tag_tool.save(cover_path)
                 self.fn_logger.info("Metadata written successfully.")
 
-                # 6. 移动最终文件到目标路径
+                # 7. 移动最终文件到目标路径
                 shutil.move(current_path, path_media_dst)
                 self.fn_logger.info(f"Downloaded item '{track_info_str}'.")
                 return True
@@ -1895,3 +1918,4 @@ class Download:
                         break
 
         return m3u8_playlist, mime_type
+

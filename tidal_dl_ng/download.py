@@ -231,7 +231,8 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed, futures
+from concurrent import futures # <--- 使用项目原始的导入方式
+from concurrent.futures import ThreadPoolExecutor, as_completed # <--- 正确地导入我们需要的工具
 from threading import Event
 from uuid import uuid4
 

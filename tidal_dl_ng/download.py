@@ -231,8 +231,8 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
-from concurrent import futures # <--- 使用项目原始的导入方式
-from concurrent.futures import ThreadPoolExecutor, as_completed # <--- 正确地导入我们需要的工具
+from concurrent import futures
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event
 from uuid import uuid4
 
@@ -242,6 +242,7 @@ from pathvalidate import sanitize_filename
 from requests.adapters import HTTPAdapter, Retry
 from requests.exceptions import HTTPError
 from rich.progress import Progress, TaskID
+import tidalapi
 from tidalapi import Album, Mix, Playlist, Session, Track, UserPlaylist, Video
 from tidalapi.exceptions import TooManyRequests
 from tidalapi.media import AudioExtensions, Codec, Quality, Stream, StreamManifest, VideoExtensions
@@ -1179,14 +1180,23 @@ class Download:
     def _handle_metadata_and_extras(
         self,
         media: Track | Video,
-        tmp_path_file: pathlib.Path, # For audio, this path is now ignored
+        tmp_path_file: pathlib.Path, # This is now obsolete for audio, but kept for video
         path_media_dst: pathlib.Path,
         is_parent_album: bool,
         media_stream: Stream | None,
     ) -> None:
+        """Handle metadata, lyrics, and cover processing.
+
+        Args:
+            media (Track | Video): Media item.
+            tmp_path_file (pathlib.Path): Temporary file path.
+            path_media_dst (pathlib.Path): Destination file path.
+            is_parent_album (bool): Whether this is a parent album.
+            media_stream (Stream | None): Media stream.
+        """
         if isinstance(media, Video):
             return
-
+        
         # Our new audio download logic places the final file at `path_media_dst`.
         # The `tmp_path_file` is now irrelevant for audio tracks.
         # We must call the original metadata writer on the final path.

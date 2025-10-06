@@ -1113,6 +1113,11 @@ class Download:
                 urls = self._parse_dash_manifest(xml_data)
                 
                 self.fn_logger.info(f"Starting parallel download of {len(urls)} segments...")
+                
+                # --- 进度条代码开始 ---
+                p_task = self.progress.add_task(f"[blue]MAX '{media.name[:25]}'", total=len(urls), visible=True)
+                # --- 进度条代码结束 ---
+
                 segment_paths = {}
                 with ThreadPoolExecutor(max_workers=self.settings.data.downloads_simultaneous_per_track_max) as executor:
                     future_to_index = {
@@ -1124,6 +1129,9 @@ class Download:
                         check, err = future.result()
                         if not check: raise Exception(f"Segment {index} download failed: {err}")
                         segment_paths[index] = temp_dir_path / f"s_{index:04d}.mp4"
+                        self.progress.advance(p_task) # 每完成一个片段，进度条前进1
+
+                self.progress.remove_task(p_task) # 下载完成后移除进度条
                 self.fn_logger.info("All segments downloaded successfully.")
                 
                 self.fn_logger.info("Merging files...")
@@ -1158,12 +1166,30 @@ class Download:
                     
                     self.fn_logger.info("Starting direct download of complete FLAC file...")
                     final_temp_path = temp_dir_path / f"{track_id}.flac"
-                    tool = DownloadTool(str(final_temp_path), [download_url])
+
+                    # --- 进度条代码开始 ---
+                    # 1. 获取文件总大小
+                    total_size = 0
+                    with requests.get(download_url, stream=True) as r:
+                        r.raise_for_status()
+                        total_size = int(r.headers.get('content-length', 0))
+                    
+                    # 2. 创建 rich 进度条任务
+                    p_task = self.progress.add_task(f"[blue]CD '{media.name[:25]}'", total=total_size, visible=True)
+
+                    # 3. 定义回调函数，用于更新进度条
+                    def progress_callback(chunk_size):
+                        self.progress.advance(p_task, advance=chunk_size)
+                    # --- 进度条代码结束 ---
+
+                    tool = DownloadTool(str(final_temp_path), [download_url], func_progress=progress_callback) # 将回调函数传给aigpy
                     download_headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.84 Safari/537.36', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate, br', 'Connection': 'keep-alive'}
                     if hasattr(tool, 'setHeaders'):
                         tool.setHeaders(download_headers)
                     check, err = tool.start(True)
                     if not check: raise Exception(f"CD quality download failed: {err}")
+                    
+                    self.progress.remove_task(p_task) # 下载完成后移除进度条
                     self.fn_logger.info(f"Path B SUCCESS: CD quality track downloaded for {track_info_str}")
                 except Exception as e_cd:
                     self.fn_logger.error(f"FATAL: Fallback for CD quality also failed. Final error: {e_cd}")

@@ -225,6 +225,7 @@ Classes:
     Download: Main class for managing downloads, segment merging, file operations, and metadata.
 """
 # Original imports start here
+import json
 import pathlib
 import random
 import tempfile
@@ -1058,6 +1059,53 @@ class Download:
     # ▲▲▲【新增结束】▲▲▲
 
     # ▼▼▼【核心修改: 完全替换 _perform_actual_download 方法】▼▼▼
+    def _write_metadata_with_tagtool(self, track: Track, file_path: pathlib.Path):
+        """使用内置的 TagTool 写入元数据和封面。"""
+        self.fn_logger.info(f"Using self-contained logic to write metadata for '{name_builder_item(track)}'...")
+        try:
+            tag_tool = TagTool(str(file_path))
+
+            # 映射 Track 对象信息到 TagTool
+            tag_tool.title = track.name
+            if track.version:
+                tag_tool.title += f' ({track.version})'
+            tag_tool.album = track.album.name
+            tag_tool.artist = [a.name for a in track.artists]
+            tag_tool.albumartist = [a.name for a in track.album.artists]
+            tag_tool.tracknumber = track.track_num
+            tag_tool.totaltrack = track.album.num_tracks
+            tag_tool.discnumber = track.volume_num
+            tag_tool.totaldisc = track.album.num_volumes
+            tag_tool.copyright = track.copyright
+            tag_tool.isrc = track.isrc
+            if track.album.release_date:
+                tag_tool.date = track.album.release_date.strftime('%Y-%m-%d')
+            
+            # 下载并嵌入封面
+            cover_url = track.album.image(CoverDimensions.Px1280)
+            cover_data = self.cover_data(url=cover_url)
+            
+            # 使用内置的 TagTool 保存元数据和封面
+            tag_tool.save(cover_data=cover_data)
+            self.fn_logger.info("Metadata and cover art written successfully.")
+
+            # （可选）处理歌词文件
+            if self.settings.data.lyrics_file:
+                try:
+                    lyrics_obj = track.lyrics()
+                    lyrics = lyrics_obj.subtitles or lyrics_obj.text
+                    if lyrics:
+                        lyrics_path = file_path.with_suffix(EXTENSION_LYRICS)
+                        with open(lyrics_path, 'w', encoding='utf-8') as f:
+                            f.write(lyrics)
+                        self.fn_logger.info("Lyrics file created successfully.")
+                except Exception:
+                    self.fn_logger.warning("Could not retrieve or save lyrics.")
+
+        except Exception as e:
+            self.fn_logger.error(f"Failed to write metadata using TagTool. Reason: {e}")
+
+    # ▼▼▼【第 2 步: 这是修改后的下载核心函数】▼▼▼
     def _perform_actual_download(
         self,
         media: Track | Video,
@@ -1169,31 +1217,30 @@ class Download:
                     return False
 
             if final_temp_path and final_temp_path.exists():
+                # 【修改点】在移动文件前，调用我们自己的元数据写入逻辑
+                self._write_metadata_with_tagtool(media, final_temp_path)
+                
                 shutil.move(final_temp_path, path_media_dst)
-                # We return True, and let the original flow handle metadata
                 return True
             else:
                 self.fn_logger.error(f"Download process for '{track_info_str}' completed but no final file was produced.")
                 return False
-    # ▲▲▲【替换结束】▲▲▲
 
+    # ▼▼▼【第 3 步: 这是修改后的旧元数据处理函数】▼▼▼
     def _handle_metadata_and_extras(
         self,
         media: Track | Video,
-        tmp_path_file: pathlib.Path, # This is now obsolete for audio, but kept for video
+        tmp_path_file: pathlib.Path,
         path_media_dst: pathlib.Path,
         is_parent_album: bool,
         media_stream: Stream | None,
     ) -> None:
-        """Handle metadata, lyrics, and cover processing.
+        """Handle metadata, lyrics, and cover processing."""
+        # 【修改点】如果是音轨，直接返回，不做任何事，因为新逻辑已全部处理完毕
+        if isinstance(media, Track):
+            return
 
-        Args:
-            media (Track | Video): Media item.
-            tmp_path_file (pathlib.Path): Temporary file path.
-            path_media_dst (pathlib.Path): Destination file path.
-            is_parent_album (bool): Whether this is a parent album.
-            media_stream (Stream | None): Media stream.
-        """
+        # 视频文件的逻辑保持不变 (因为视频下载仍然使用旧流程)
         if isinstance(media, Video):
             return
         

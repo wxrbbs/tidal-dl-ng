@@ -1,3 +1,243 @@
+# --- START OF INCLUDED AIGPY CODE ---
+
+#
+# This code is from `aigpy.path`
+# It is included directly to avoid dependency issues.
+#
+import os
+import shutil
+
+class Path(object):
+    def __init__(self, path):
+        self.path = path
+    def is_dir(self):
+        return os.path.isdir(self.path)
+    def is_file(self):
+        return os.path.isfile(self.path)
+    def exists(self):
+        return os.path.exists(self.path)
+    def mkdir(self, parents=True):
+        if parents:
+            os.makedirs(self.path, exist_ok=True)
+        else:
+            os.mkdir(self.path)
+    def touch(self):
+        if not self.exists():
+            # Get directory name and create it if it doesn't exist
+            dirname = os.path.dirname(self.path)
+            if dirname and not os.path.exists(dirname):
+                os.makedirs(dirname, exist_ok=True)
+            open(self.path, 'a').close()
+    def remove(self):
+        if not self.exists():
+            return
+        if self.is_dir():
+            shutil.rmtree(self.path)
+        else:
+            os.remove(self.path)
+
+#
+# This code is from `aigpy.download`
+#
+import requests
+import threading
+
+class DownloadTool(object):
+    def __init__(self, path, urls, thread_num=5, func_progress=None):
+        self.path = path
+        self.urls = urls if isinstance(urls, list) else [urls]
+        self.total_size = 0
+        self.chunk_size = 1024 * 1024
+        self.thread_num = thread_num
+        self.func_progress = func_progress
+        self.is_stop = False
+        self.headers = {} # Added to support custom headers
+
+    def setHeaders(self, headers): # Added to support custom headers
+        self.headers = headers
+
+    def __get_file_size__(self, url):
+        try:
+            response = requests.head(url, timeout=20, headers=self.headers)
+            if 'Content-Length' in response.headers:
+                return int(response.headers['Content-Length'])
+        except Exception:
+            pass
+        return 0
+
+    def __download_file__(self, url, start, end, thread_id, fun_progress):
+        try:
+            headers = self.headers.copy() # Use custom headers
+            if end is not None: # Support for non-range downloads
+                headers["Range"] = f"bytes={start}-{end}"
+            
+            response = requests.get(url, headers=headers, stream=True, timeout=(30, 120))
+            response.raise_for_status()
+            
+            with open(self.path, "rb+") as f:
+                f.seek(start)
+                for chunk in response.iter_content(chunk_size=self.chunk_size):
+                    if not chunk or self.is_stop:
+                        break
+                    f.write(chunk)
+                    if fun_progress:
+                        fun_progress(len(chunk))
+        except requests.exceptions.RequestException:
+            # Silently fail, let the main logic handle retries or failure
+            return False
+        return True
+
+    def __run_thread__(self, url, start_pos, file_size, func_progress):
+        thread_list = []
+        part_size = file_size // self.thread_num
+
+        for i in range(self.thread_num):
+            start = start_pos + i * part_size
+            end = start + part_size - 1
+            if i == self.thread_num - 1:
+                end = start_pos + file_size - 1
+
+            t = threading.Thread(target=self.__download_file__, args=(url, start, end, i, func_progress))
+            t.start()
+            thread_list.append(t)
+
+        for t in thread_list:
+            t.join()
+
+    def stop(self):
+        self.is_stop = True
+
+    def start(self, check=False):
+        Path(self.path).touch() 
+        
+        if len(self.urls) == 1:
+            # For single file download (CD Quality)
+            success = self.__download_file__(self.urls[0], 0, None, 0, None)
+            if success and os.path.exists(self.path):
+                return True, ""
+            return False, "Download failed."
+
+        # Multi-segment download should be handled by ThreadPoolExecutor directly
+        return False, "Multi-segment download should be handled by ThreadPoolExecutor."
+
+#
+# This code is from `aigpy.tag`
+#
+from mutagen.flac import FLAC, Picture
+from mutagen.mp4 import MP4, MP4Cover
+import base64
+
+class TagTool(object):
+    def __init__(self, path):
+        self.path = path
+        self.title = None
+        self.album = None
+        self.artist = None
+        self.albumartist = None
+        self.composer = None
+        self.tracknumber = None
+        self.discnumber = None
+        self.totaltrack = None
+        self.totaldisc = None
+        self.copyright = None
+        self.date = None
+        self.isrc = None
+        self.lyrics = None
+
+    def save(self, cover_path=None, cover_data=None):
+        path = str(self.path)
+        try:
+            if ".flac" in path.lower():
+                self.__save_flac__(cover_path, cover_data)
+            elif ".m4a" in path.lower():
+                self.__save_m4a__(cover_path, cover_data)
+        except Exception:
+            pass
+    
+    def __save_m4a__(self, cover_path=None, cover_data=None):
+        try:
+            tags = MP4(self.path)
+        except Exception:
+            tags = MP4()
+        
+        if self.title: tags["\xa9nam"] = [self.title]
+        if self.album: tags["\xa9alb"] = [self.album]
+        if self.artist: tags["\xa9ART"] = [", ".join(self.artist)]
+        if self.albumartist: tags["aART"] = [", ".join(self.albumartist)]
+        if self.composer: tags["\xa9wrt"] = [", ".join(self.composer)]
+        if self.tracknumber: tags["trkn"] = [(self.tracknumber, self.totaltrack or 0)]
+        if self.discnumber: tags["disk"] = [(self.discnumber, self.totaldisc or 0)]
+        if self.copyright: tags["cprt"] = [self.copyright]
+        if self.date: tags["\xa9day"] = [self.date]
+        if self.isrc: tags["----:com.apple.iTunes:ISRC"] = self.isrc.encode('utf-8')
+        if self.lyrics: tags["\xa9lyr"] = [self.lyrics]
+
+        if not cover_data and cover_path:
+            with open(cover_path, "rb") as f:
+                cover_data = f.read()
+        if cover_data:
+            tags["covr"] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]
+        
+        tags.save(self.path)
+
+    # ▼▼▼【最终修复版 METADATA 写入函数】▼▼▼
+    def __save_flac__(self, cover_path=None, cover_data=None):
+        # 步骤 1: 只打开文件一次
+        tags = FLAC(self.path)
+        tags.delete() # 清理旧标签，确保干净
+        
+        # 步骤 2: 写入所有文本元数据
+        if self.title: tags["TITLE"] = self.title
+        if self.album: tags["ALBUM"] = self.album
+        if self.artist: tags["ARTIST"] = self.artist if isinstance(self.artist, list) else [self.artist]
+        if self.albumartist: tags["ALBUMARTIST"] = self.albumartist if isinstance(self.albumartist, list) else [self.albumartist]
+        if self.composer: tags["COMPOSER"] = self.composer
+        if self.tracknumber: tags["TRACKNUMBER"] = str(self.tracknumber)
+        if self.discnumber: tags["DISCNUMBER"] = str(self.discnumber)
+        if self.totaltrack: tags["TRACKTOTAL"] = str(self.totaltrack)
+        if self.totaldisc: tags["DISCTOTAL"] = str(self.totaldisc)
+        if self.copyright: tags["COPYRIGHT"] = self.copyright
+        if self.date: tags["DATE"] = self.date
+        if self.isrc: tags["ISRC"] = self.isrc
+        if self.lyrics: tags["LYRICS"] = self.lyrics
+
+        # 步骤 3: 处理封面
+        # 如果上层代码直接传递了URL (cover_path)，就在这里下载
+        if not cover_data and cover_path:
+            if cover_path.startswith('http'):
+                cover_data = None # 关键保护：先将变量设为None
+                try:
+                    # 从URL下载封面数据
+                    print(f"[AIGPY TagTool] Downloading cover from URL: {cover_path}")
+                    cover_data = requests.get(cover_path, timeout=20).content
+                except Exception as e:
+                    print(f"[AIGPY TagTool] Failed to download cover: {e}")
+            else:
+                try:
+                    # 从本地文件路径读取
+                    with open(cover_path, "rb") as f:
+                        cover_data = f.read()
+                except Exception as e:
+                    print(f"[AIGPY TagTool] Failed to read cover file: {e}")
+
+        # 步骤 4: 嵌入封面（如果封面数据存在）
+        if cover_data:
+            image = Picture()
+            image.data = cover_data
+            image.type = 3
+            image.mime = u"image/jpeg"
+            # 核心修复：手动设置封面宽高，解决 Invalid resolution 错误
+            image.width = 1280
+            image.height = 1280
+            tags.clear_pictures()
+            tags.add_picture(image)
+
+        # 步骤 5: 一次性保存所有更改
+        tags.save()
+            
+# --- END OF INCLUDED AIGPY CODE ---
+
+
 """
 download.py
 
@@ -7,29 +247,30 @@ Classes:
     RequestsClient: Simple HTTP client for downloading text content.
     Download: Main class for managing downloads, segment merging, file operations, and metadata.
 """
-
-import os
+# Original imports start here
+import json
 import pathlib
 import random
-import shutil
 import tempfile
 import time
-import aigpy
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from concurrent import futures
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event
 from uuid import uuid4
 
 import m3u8
-import requests
 from ffmpeg import FFmpeg
 from pathvalidate import sanitize_filename
 from requests.adapters import HTTPAdapter, Retry
 from requests.exceptions import HTTPError
 from rich.progress import Progress, TaskID
+import tidalapi
 from tidalapi import Album, Mix, Playlist, Session, Track, UserPlaylist, Video
 from tidalapi.exceptions import TooManyRequests
 from tidalapi.media import AudioExtensions, Codec, Quality, Stream, StreamManifest, VideoExtensions
+from datetime import datetime
 
 from tidal_dl_ng.config import Settings
 from tidal_dl_ng.constants import (
@@ -65,8 +306,6 @@ from tidal_dl_ng.model.downloader import DownloadSegmentResult
 from tidal_dl_ng.model.gui_data import ProgressBars
 
 
-# TODO: Set appropriate client string and use it for video download.
-# https://github.com/globocom/m3u8#using-different-http-clients
 class RequestsClient:
     """HTTP client for downloading text content from a URI."""
 
@@ -92,7 +331,6 @@ class RequestsClient:
         return o.text, o.url
 
 
-# TODO: Use pathlib.Path everywhere
 class Download:
     """Main class for managing downloads, segment merging, file operations, and metadata for TIDAL media."""
 
@@ -209,12 +447,13 @@ class Download:
             try:
                 # Get file size and compute progress steps
                 r = requests.head(urls[0], timeout=REQUESTS_TIMEOUT_SEC)
-
+                r.raise_for_status()
                 total_size_in_bytes: int = int(r.headers.get("content-length", 0))
                 block_size = 1048576
                 progress_total = total_size_in_bytes / block_size
             finally:
-                r.close()
+                if 'r' in locals():
+                    r.close()
         else:
             raise ValueError
 
@@ -399,7 +638,7 @@ class Download:
                     dl_segment_result.path_segment.unlink()
 
         except Exception:
-            if dl_segment_result is not dl_segment_results[-1]:
+            if 'dl_segment_result' in locals() and dl_segment_result is not dl_segment_results[-1]:
                 result = False
 
         return result
@@ -751,9 +990,35 @@ class Download:
         os.makedirs(path_media_dst.parent, exist_ok=True)
 
         # Perform actual download
-        return self._perform_actual_download(
-            media, path_media_dst, stream_manifest, do_flac_extract, is_parent_album, media_stream
-        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_path_dir:
+            tmp_path_file: pathlib.Path = pathlib.Path(tmp_path_dir) / str(uuid4())
+            tmp_path_file.touch()
+
+            # The actual download, including segment merging and decryption, happens here.
+            result_download, tmp_path_file = self._download(
+                media=media, stream_manifest=stream_manifest, path_file=tmp_path_file
+            )
+
+            # Move file to final destination if download succeeded
+            if result_download:
+                if isinstance(media, Track):
+                    # If FLAC needs to be extracted, do so. This can also happen with MQA.
+                    if do_flac_extract:
+                        tmp_path_file = self._extract_flac(tmp_path_file)
+                elif isinstance(media, Video):
+                    # Convert video to MP4
+                    if self.settings.data.video_convert_mp4:
+                        tmp_path_file = self._video_convert(tmp_path_file)
+
+                # Add metadata to file
+                self._handle_metadata_and_extras(media, tmp_path_file, path_media_dst, is_parent_album, media_stream)
+
+                self.fn_logger.info(f"Downloaded item '{name_builder_item(media)}'.")
+                shutil.move(tmp_path_file, path_media_dst)
+
+                return True
+            else:
+                return False
 
     def _get_stream_info(self, media: Track | Video) -> tuple[StreamManifest | None, str, bool, Stream | None]:
         """Get stream information for media.
@@ -795,116 +1060,6 @@ class Download:
             file_extension = AudioExtensions.MP4 if self.settings.data.video_convert_mp4 else VideoExtensions.TS
 
         return stream_manifest, file_extension, do_flac_extract, media_stream
-
-    def _perform_actual_download(
-        self,
-        media: Track | Video,
-        path_media_dst: pathlib.Path,
-        stream_manifest: StreamManifest | None,
-        do_flac_extract: bool,
-        is_parent_album: bool,
-        media_stream: Stream | None,
-    ) -> bool:
-        """
-        【这是你的新版下载逻辑】
-        使用 aigpy 进行并行下载和元数据写入。
-        """
-        # 你的逻辑主要针对音轨，如果不是Track，就直接返回失败
-        if not isinstance(media, Track):
-            self.fn_logger.error("Custom download logic currently only supports audio tracks.")
-            return False
-
-        track_id = media.id
-        track_info_str = f"{media.name} - {media.artist.name if media.artist else 'Unknown Artist'}"
-        
-        # 从 stream_manifest 获取必要信息
-        stream_urls = stream_manifest.get_urls()
-        is_encrypted = stream_manifest.is_encrypted
-        encryption_key = stream_manifest.encryption_key
-
-        # 创建一个临时目录来存放所有文件
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
-            temp_dir_path = pathlib.Path(tmp_dir)
-            try:
-                # 1. 【你的逻辑】使用 aigpy 并行下载
-                self.fn_logger.info(f"Starting parallel download for {len(stream_urls)} segments using aigpy...")
-                segment_paths = {}
-                with futures.ThreadPoolExecutor(max_workers=10) as executor:
-                    future_to_url = {}
-                    for i, url in enumerate(stream_urls):
-                        segment_path = temp_dir_path / f"segment_{i:04d}"
-                        future = executor.submit(aigpy.download.DownloadTool(str(segment_path), [url]).start, False)
-                        future_to_url[future] = (i, segment_path)
-
-                    for future in futures.as_completed(future_to_url):
-                        index, path = future_to_url[future]
-                        check, err = future.result()
-                        if not check:
-                            raise Exception(f"Segment {index} download failed: {err}")
-                        segment_paths[index] = path
-                self.fn_logger.info("All segments downloaded successfully.")
-
-                # 2. 【你的逻辑】合并文件
-                self.fn_logger.info("Merging segments...")
-                merged_path = temp_dir_path / f"{track_id}.merged"
-                with open(merged_path, 'wb') as f_dest:
-                    for i in range(len(stream_urls)):
-                        segment_path = segment_paths.get(i)
-                        if not segment_path:
-                            raise Exception(f"Missing segment {i} for merging.")
-                        with open(segment_path, 'rb') as f_src:
-                            shutil.copyfileobj(f_src, f_dest)
-                current_path = merged_path
-                
-                # 3. 【你的逻辑】解密
-                if is_encrypted:
-                    self.fn_logger.info("Decrypting file...")
-                    decrypted_path = temp_dir_path / f"{track_id}.decrypted"
-                    key, nonce = decrypt_security_token(encryption_key)
-                    decrypt_file(current_path, decrypted_path, key, nonce)
-                    current_path = decrypted_path
-                    self.fn_logger.info("Decryption successful.")
-
-                # 4. 【你的逻辑】提取FLAC (调用项目自身的方法)
-                if do_flac_extract:
-                    self.fn_logger.info("Extracting FLAC from M4A container...")
-                    # 这里我们调用项目自带的、更可靠的 _extract_flac 方法
-                    extracted_path = self._extract_flac(current_path)
-                    if not extracted_path or not extracted_path.exists():
-                        raise Exception("FLAC extraction failed.")
-                    current_path = extracted_path
-                
-                # 5. 【你的逻辑】写入元数据 (使用 aigpy.tag)
-                self.fn_logger.info(f"Writing metadata for '{track_info_str}' using aigpy...")
-                tag_tool = aigpy.tag.TagTool(str(current_path))
-                tag_tool.album = media.album.name
-                tag_tool.title = media.name
-                if not aigpy.string.isNull(media.version):
-                    tag_tool.title += ' (' + media.version + ')'
-                tag_tool.artist = [a.name for a in media.artists]
-                tag_tool.copyright = media.copyright
-                tag_tool.tracknumber = media.track_num
-                tag_tool.discnumber = media.volume_num
-                # 此处省略了contributor和composer的逻辑以简化
-                tag_tool.isrc = media.isrc
-                tag_tool.albumartist = [a.name for a in media.album.artists]
-                tag_tool.date = media.album.release_date.strftime('%Y-%m-%d') if media.album.release_date else None
-                tag_tool.totaldisc = media.album.num_volumes
-                
-                cover_url = media.album.image(1280)
-                tag_tool.save(cover_url)
-                self.fn_logger.info("Metadata written successfully.")
-
-                # 6. 移动最终文件到目标路径
-                shutil.move(current_path, path_media_dst)
-                self.fn_logger.info(f"Downloaded item '{track_info_str}'.")
-                return True
-
-            except Exception as e:
-                self.fn_logger.exception(f"Download process failed for '{track_info_str}': {e}")
-                return False
-
-            
 
     def _handle_metadata_and_extras(
         self,

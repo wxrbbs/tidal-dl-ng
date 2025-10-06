@@ -151,9 +151,7 @@ class TagTool(object):
                 self.__save_flac__(cover_path, cover_data)
             elif ".m4a" in path.lower():
                 self.__save_m4a__(cover_path, cover_data)
-        except Exception as e:
-            # 增加错误日志，方便定位问题
-            print(f"[AIGPY TagTool Save Error] An exception occurred: {e}")
+        except Exception:
             pass
     
     def __save_m4a__(self, cover_path=None, cover_data=None):
@@ -182,11 +180,13 @@ class TagTool(object):
         
         tags.save(self.path)
 
+    # ▼▼▼【最终修复版 METADATA 写入函数】▼▼▼
     def __save_flac__(self, cover_path=None, cover_data=None):
+        # 步骤 1: 只打开文件一次
         tags = FLAC(self.path)
-        tags.delete()
-
-        # ... (这里写入文本标签的代码保持不变)
+        tags.delete() # 清理旧标签，确保干净
+        
+        # 步骤 2: 写入所有文本元数据
         if self.title: tags["TITLE"] = self.title
         if self.album: tags["ALBUM"] = self.album
         if self.artist: tags["ARTIST"] = self.artist if isinstance(self.artist, list) else [self.artist]
@@ -201,39 +201,39 @@ class TagTool(object):
         if self.isrc: tags["ISRC"] = self.isrc
         if self.lyrics: tags["LYRICS"] = self.lyrics
 
-        tags.save(self.path)
-
-        # ▼▼▼【核心修改】▼▼▼
-        # 如果没有直接提供cover_data，并且cover_path存在
+        # 步骤 3: 处理封面
+        # 如果上层代码直接传递了URL (cover_path)，就在这里下载
         if not cover_data and cover_path:
-            # 判断 cover_path 是不是一个URL
             if cover_path.startswith('http'):
+                cover_data = None # 关键保护：先将变量设为None
                 try:
-                    # 如果是URL，就用requests下载它
+                    # 从URL下载封面数据
                     print(f"[AIGPY TagTool] Downloading cover from URL: {cover_path}")
                     cover_data = requests.get(cover_path, timeout=20).content
                 except Exception as e:
                     print(f"[AIGPY TagTool] Failed to download cover: {e}")
             else:
                 try:
-                    # 如果不是URL，就按原样当作本地文件路径打开
+                    # 从本地文件路径读取
                     with open(cover_path, "rb") as f:
                         cover_data = f.read()
                 except Exception as e:
                     print(f"[AIGPY TagTool] Failed to read cover file: {e}")
-        # ▲▲▲【修改结束】▲▲▲
 
+        # 步骤 4: 嵌入封面（如果封面数据存在）
         if cover_data:
-            audio = FLAC(self.path)
             image = Picture()
             image.data = cover_data
             image.type = 3
             image.mime = u"image/jpeg"
+            # 核心修复：手动设置封面宽高，解决 Invalid resolution 错误
             image.width = 1280
             image.height = 1280
-            audio.clear_pictures()
-            audio.add_picture(image)
-            audio.save()
+            tags.clear_pictures()
+            tags.add_picture(image)
+
+        # 步骤 5: 一次性保存所有更改
+        tags.save()
             
 # --- END OF INCLUDED AIGPY CODE ---
 
@@ -751,7 +751,24 @@ class Download:
         list_position: int = 0,
         list_total: int = 0,
     ) -> tuple[bool, pathlib.Path | str]:
-        """Download a single media item, handling file naming, skipping, and post-processing."""
+        """Download a single media item, handling file naming, skipping, and post-processing.
+
+        Args:
+            file_template (str): Template for file naming.
+            media_id (str | None, optional): Media ID. Defaults to None.
+            media_type (MediaType | None, optional): Media type. Defaults to None.
+            media (Track | Video | None, optional): Media item. Defaults to None.
+            video_download (bool, optional): Whether to allow video downloads. Defaults to True.
+            download_delay (bool, optional): Whether to delay between downloads. Defaults to False.
+            quality_audio (Quality | None, optional): Audio quality. Defaults to None.
+            quality_video (QualityVideo | None, optional): Video quality. Defaults to None.
+            is_parent_album (bool, optional): Whether this is a parent album. Defaults to False.
+            list_position (int, optional): Position in list. Defaults to 0.
+            list_total (int, optional): Total items in list. Defaults to 0.
+
+        Returns:
+            tuple[bool, pathlib.Path | str]: (Downloaded, path to file)
+        """
         # Step 1: Validate and prepare media
         validated_media = self._validate_and_prepare_media(media, media_id, media_type, video_download)
         if validated_media is None or not isinstance(validated_media, Track | Video):
@@ -766,17 +783,18 @@ class Download:
 
         if skip_file:
             self.fn_logger.debug(f"Download skipped, since file exists: '{path_media_dst}'")
+
             return True, path_media_dst
 
         # Step 3: Handle quality settings
         quality_audio_old, quality_video_old = self._adjust_quality_settings(quality_audio, quality_video)
 
-        # Step 4: Download and process media, now fully self-contained including metadata.
+        # Step 4: Download and process media
         download_success = self._download_and_process_media(
             media, path_media_dst, skip_download, is_parent_album, file_extension_dummy
         )
 
-        # Step 5: Post-processing. The call to _handle_metadata_and_extras is now completely removed.
+        # Step 5: Post-processing
         self._perform_post_processing(
             media,
             path_media_dst,
@@ -797,19 +815,34 @@ class Download:
         media_type: MediaType | None,
         video_download: bool = True,
     ) -> Track | Video | Album | Playlist | UserPlaylist | Mix | None:
-        """Validate and prepare media instance for download."""
+        """Validate and prepare media instance for download.
+
+        Args:
+            media (Track | Video | Album | Playlist | UserPlaylist | Mix | None): Media instance.
+            media_id (str | None): Media ID if creating new instance.
+            media_type (MediaType | None): Media type if creating new instance.
+            video_download (bool, optional): Whether video downloads are allowed. Defaults to True.
+
+        Returns:
+            Track | Video | Album | Playlist | UserPlaylist | Mix | None: Prepared media instance or None if invalid.
+        """
         try:
             if media_id and media_type:
+                # If no media instance is provided, we need to create the media instance.
+                # Throws `tidalapi.exceptions.ObjectNotFound` if item is not available anymore.
                 media = instantiate_media(self.session, media_type, media_id)
             elif isinstance(media, Track | Video):
+                # Check if media is available not deactivated / removed from TIDAL.
                 if not media.available:
                     self.fn_logger.info(
                         f"This item is not available for listening anymore on TIDAL. Skipping: {name_builder_item(media)}"
                     )
                     return None
                 elif isinstance(media, Track):
+                    # Re-create media instance with full album information
                     media = self.session.track(str(media.id), with_album=True)
             elif isinstance(media, Album):
+                # Check if media is available not deactivated / removed from TIDAL.
                 if not media.available:
                     self.fn_logger.info(
                         f"This item is not available for listening anymore on TIDAL. Skipping: {name_builder_title(media)}"
@@ -820,6 +853,7 @@ class Download:
         except:
             return None
 
+        # If video download is not allowed and this is a video, return None
         if not video_download and isinstance(media, Video):
             self.fn_logger.info(
                 f"Video downloads are deactivated (see settings). Skipping video: {name_builder_item(media)}"
@@ -836,7 +870,19 @@ class Download:
         list_position: int,
         list_total: int,
     ) -> tuple[pathlib.Path, str, bool, bool]:
-        """Prepare file paths and determine skip logic."""
+        """Prepare file paths and determine skip logic.
+
+        Args:
+            media (Track | Video): Media item.
+            file_template (str): Template for file naming.
+            quality_audio (Quality | None): Audio quality setting.
+            list_position (int): Position in list.
+            list_total (int): Total items in list.
+
+        Returns:
+            tuple[pathlib.Path, str, bool, bool]: (path_media_dst, file_extension_dummy, skip_file, skip_download)
+        """
+        # Create file name and path
         metadata_tags = [] if isinstance(media, Video) else (media.media_metadata_tags or [])
         quality_for_extension = quality_audio if quality_audio is not None else Quality.high_lossless
 
@@ -854,14 +900,17 @@ class Download:
             pathlib.Path(self.path_base).expanduser() / (file_name_relative + file_extension_dummy)
         ).absolute()
 
+        # Sanitize final path_file to fit into OS boundaries.
         path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
 
+        # Compute if and how downloads need to be skipped.
         skip_download: bool = False
 
         if self.skip_existing:
             skip_file: bool = check_file_exists(path_media_dst, extension_ignore=False)
 
             if self.settings.data.symlink_to_track and not isinstance(media, Video):
+                # Compute symlink tracks path, sanitize and check if file exists
                 file_name_track_dir_relative: str = format_path_media(self.settings.data.format_track, media)
                 path_media_track_dir: pathlib.Path = (
                     pathlib.Path(self.path_base).expanduser() / (file_name_track_dir_relative + file_extension_dummy)
@@ -873,6 +922,7 @@ class Download:
                 )
                 skip_download = file_exists_playlist_dir or file_exists_track_dir
 
+                # If file exists in playlist dir but not in track dir, we don't skip the file itself
                 if skip_file and file_exists_playlist_dir:
                     skip_file = False
         else:
@@ -883,13 +933,24 @@ class Download:
     def _adjust_quality_settings(
         self, quality_audio: Quality | None, quality_video: QualityVideo | None
     ) -> tuple[Quality | None, QualityVideo | None]:
-        """Adjust quality settings and return previous values."""
+        """Adjust quality settings and return previous values.
+
+        Args:
+            quality_audio (Quality | None): Audio quality setting.
+            quality_video (QualityVideo | None): Video quality setting.
+
+        Returns:
+            tuple[Quality | None, QualityVideo | None]: Previous quality settings.
+        """
         quality_audio_old: Quality | None = None
         quality_video_old: QualityVideo | None = None
+
         if quality_audio:
             quality_audio_old = self.adjust_quality_audio(quality_audio)
+
         if quality_video:
             quality_video_old = self.adjust_quality_video(quality_video)
+
         return quality_audio_old, quality_video_old
 
     def _download_and_process_media(
@@ -900,189 +961,105 @@ class Download:
         is_parent_album: bool,
         file_extension_dummy: str,
     ) -> bool:
-        """Download and process media file, including metadata."""
+        """Download and process media file.
+
+        Args:
+            media (Track | Video): Media item.
+            path_media_dst (pathlib.Path): Destination file path.
+            skip_download (bool): Whether to skip download.
+            is_parent_album (bool): Whether this is a parent album.
+            file_extension_dummy (str): Dummy file extension.
+
+        Returns:
+            bool: Whether download was successful.
+        """
         if skip_download:
             return True
 
-        stream_manifest, _, _, _ = self._get_stream_info(media)
+        # Get stream information and final file extension
+        stream_manifest, file_extension, do_flac_extract, media_stream = self._get_stream_info(media)
 
-        if isinstance(media, Track) and path_media_dst.suffix.lower() != '.flac':
-             path_media_dst = path_media_dst.with_suffix('.flac')
+        if stream_manifest is None and isinstance(media, Track):
+            return False
+
+        # Update path if extension changed
+        if path_media_dst.suffix != file_extension:
+            path_media_dst = path_media_dst.with_suffix(file_extension)
+            path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
 
         os.makedirs(path_media_dst.parent, exist_ok=True)
-        return self._perform_actual_download(
-            media=media,
-            path_media_dst=path_media_dst,
-            stream_manifest=stream_manifest,
-            do_flac_extract=None, 
-            is_parent_album=is_parent_album,
-            media_stream=None
-        )
+
+        # Perform actual download
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_path_dir:
+            tmp_path_file: pathlib.Path = pathlib.Path(tmp_path_dir) / str(uuid4())
+            tmp_path_file.touch()
+
+            # The actual download, including segment merging and decryption, happens here.
+            result_download, tmp_path_file = self._download(
+                media=media, stream_manifest=stream_manifest, path_file=tmp_path_file
+            )
+
+            # Move file to final destination if download succeeded
+            if result_download:
+                if isinstance(media, Track):
+                    # If FLAC needs to be extracted, do so. This can also happen with MQA.
+                    if do_flac_extract:
+                        tmp_path_file = self._extract_flac(tmp_path_file)
+                elif isinstance(media, Video):
+                    # Convert video to MP4
+                    if self.settings.data.video_convert_mp4:
+                        tmp_path_file = self._video_convert(tmp_path_file)
+
+                # Add metadata to file
+                self._handle_metadata_and_extras(media, tmp_path_file, path_media_dst, is_parent_album, media_stream)
+
+                self.fn_logger.info(f"Downloaded item '{name_builder_item(media)}'.")
+                shutil.move(tmp_path_file, path_media_dst)
+
+                return True
+            else:
+                return False
 
     def _get_stream_info(self, media: Track | Video) -> tuple[StreamManifest | None, str, bool, Stream | None]:
-        """Get stream information for media."""
-        stream_manifest, media_stream, do_flac_extract, file_extension = None, None, False, ""
+        """Get stream information for media.
+
+        Args:
+            media (Track | Video): Media item.
+
+        Returns:
+            tuple[StreamManifest | None, str, bool, Stream | None]: Stream info.
+        """
+        stream_manifest: StreamManifest | None = None
+        media_stream: Stream | None = None
+        do_flac_extract: bool = False
+
         if isinstance(media, Track):
             try:
                 media_stream = media.get_stream()
                 stream_manifest = media_stream.get_stream_manifest()
+            except TooManyRequests:
+                self.fn_logger.exception(
+                    f"Too many requests against TIDAL backend. Skipping '{name_builder_item(media)}'. "
+                    f"Consider to activate delay between downloads."
+                )
+
+                return None, "", False, None
             except Exception:
-                pass
+                self.fn_logger.exception(f"Something went wrong. Skipping '{name_builder_item(media)}'.")
+
+                return None, "", False, None
+
+            file_extension = stream_manifest.file_extension
+
+            if self.settings.data.extract_flac and (
+                stream_manifest.codecs.upper() == Codec.FLAC and file_extension != AudioExtensions.FLAC
+            ):
+                file_extension = AudioExtensions.FLAC
+                do_flac_extract = True
+        elif isinstance(media, Video):
+            file_extension = AudioExtensions.MP4 if self.settings.data.video_convert_mp4 else VideoExtensions.TS
+
         return stream_manifest, file_extension, do_flac_extract, media_stream
-
-    def _write_metadata_with_aigpy(self, track: Track, file_path: pathlib.Path):
-        """[AIGPY] Writes metadata and cover using the self-contained TagTool."""
-        self.fn_logger.info(f"Writing metadata for '{name_builder_item(track)}' using AIGPY tool (TagTool)...")
-        try:
-            tag_tool = TagTool(str(file_path))
-            tag_tool.title = track.name
-            if track.version:
-                tag_tool.title += f' ({track.version})'
-            tag_tool.album = track.album.name
-            tag_tool.artist = [a.name for a in track.artists]
-            tag_tool.albumartist = [a.name for a in track.album.artists]
-            tag_tool.tracknumber = track.track_num
-            tag_tool.totaltrack = track.album.num_tracks
-            tag_tool.discnumber = track.volume_num
-            tag_tool.totaldisc = track.album.num_volumes
-            tag_tool.copyright = track.copyright
-            tag_tool.isrc = track.isrc
-            if track.album.release_date:
-                tag_tool.date = track.album.release_date.strftime('%Y-%m-%d')
-            
-            cover_url = track.album.image(1280)
-            tag_tool.save(cover_path=cover_url) # <--- 修改这一行，传递 cover_url
-            
-            tag_tool.save(cover_data=cover_data)
-            self.fn_logger.info("AIGPY: Metadata and cover art written successfully.")
-
-            if self.settings.data.lyrics_file:
-                try:
-                    lyrics_obj = track.lyrics()
-                    lyrics = lyrics_obj.subtitles or lyrics_obj.text
-                    if lyrics:
-                        lyrics_path = file_path.with_suffix(EXTENSION_LYRICS)
-                        with open(lyrics_path, 'w', encoding='utf-8') as f: f.write(lyrics)
-                        self.fn_logger.info("AIGPY: Lyrics file created successfully.")
-                except Exception:
-                    self.fn_logger.warning("AIGPY: Could not retrieve or save lyrics.")
-        except Exception as e:
-            self.fn_logger.error(f"AIGPY: Failed to write metadata. Reason: {e}")
-
-    def _get_v1_session(self) -> tidalapi.Session:
-        """Creates a temporary V1 session for special API calls."""
-        self.fn_logger.info("Initializing temporary V1 session for API call...")
-        config = tidalapi.Config(client_id='zU4XHVVkc2tDPo4t', client_secret='VJKhDFqJPqvsPVNBV6ukXTJmwK_H_v_wZC_MAB3oV3c=')
-        temp_session = tidalapi.Session(config=config)
-        temp_session.load_oauth_session(
-            token_type=self.session.token_type,
-            access_token=self.session.access_token,
-            refresh_token=self.session.refresh_token,
-            expiry_time=self.session.expiry_time
-        )
-        self.fn_logger.info("Temporary V1 session is active.")
-        return temp_session
-
-    def _parse_dash_manifest(self, xml_string: str) -> list[str]:
-        """Parses DASH XML manifest to generate a full list of URLs."""
-        self.fn_logger.info("Parsing XML manifest...")
-        ns = {'mpd': 'urn:mpeg:dash:schema:mpd:2011'}
-        root = ET.fromstring(xml_string)
-        template = root.find('.//mpd:SegmentTemplate', ns)
-        init_url = template.get('initialization')
-        media_template_url = template.get('media')
-        start_number = int(template.get('startNumber', 1))
-        timeline = root.find('.//mpd:SegmentTimeline', ns)
-        total_segments = sum(int(s.get('r', 0)) + 1 for s in timeline.findall('mpd:S', ns))
-        urls = [init_url] + [media_template_url.replace('$Number$', str(start_number + i)) for i in range(total_segments)]
-        self.fn_logger.info(f"Generated a total of {len(urls)} segment URLs.")
-        return urls
-
-    def _perform_actual_download(
-        self,
-        media: Track | Video,
-        path_media_dst: pathlib.Path,
-        stream_manifest: StreamManifest | None, 
-        do_flac_extract: bool,
-        is_parent_album: bool,
-        media_stream: Stream | None,
-    ) -> bool:
-        
-        if isinstance(media, Video):
-            self.fn_logger.info(f"Media is a video. Using original download method for '{name_builder_item(media)}'.")
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_path_dir:
-                tmp_path_file = pathlib.Path(tmp_path_dir) / str(uuid4())
-                result_download, tmp_path_file = self._download(media=media, stream_manifest=stream_manifest, path_file=tmp_path_file)
-                if not result_download: return False
-                if self.settings.data.video_convert_mp4:
-                    tmp_path_file = self._video_convert(tmp_path_file)
-                shutil.move(tmp_path_file, path_media_dst)
-                return True
-        
-        if not isinstance(media, Track):
-            return False
-
-        track_info_str = f"{media.name} - {media.artist.name if media.artist else 'Unknown Artist'}"
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-            temp_dir_path = pathlib.Path(temp_dir)
-            final_temp_path = None
-            
-            try:
-                # Path A: Attempt MAX quality
-                self.fn_logger.info(f"Path A: Attempting to fetch MAX quality for: {track_info_str}")
-                v1_session = self._get_v1_session()
-                headers = {'authorization': f'Bearer {v1_session.access_token}'}
-                params = {"audioquality": "HI_RES", "playbackmode": "STREAM", "assetpresentation": "FULL"}
-                api_url = f'https://api.tidal.com/v1/tracks/{media.id}/playbackinfopostpaywall'
-                response = requests.get(api_url, headers=headers, params=params)
-                response.raise_for_status()
-                data = response.json()
-                if "application/dash+xml" not in data.get('manifestMimeType', ''):
-                    raise ValueError(f"Server did not return expected XML for MAX. Got: {data.get('manifestMimeType', 'N/A')}")
-                
-                xml_data = base64.b64decode(data['manifest']).decode('utf-8')
-                urls = self._parse_dash_manifest(xml_data)
-                
-                segment_paths = {}
-                with ThreadPoolExecutor(max_workers=self.settings.data.downloads_simultaneous_per_track_max) as executor:
-                    future_to_index = {
-                        executor.submit(DownloadTool(str(temp_dir_path / f"s_{i:04d}"), [url]).start, False): i
-                        for i, url in enumerate(urls)
-                    }
-                    for future in as_completed(future_to_index):
-                        index = future_to_index[future]
-                        check, err = future.result()
-                        if not check: raise Exception(f"Segment {index} download failed: {err}")
-                        segment_paths[index] = temp_dir_path / f"s_{index:04d}"
-                
-                merged_path = temp_dir_path / "merged.mp4"
-                with open(merged_path, 'wb') as f_dest:
-                    for i in range(len(urls)):
-                        with open(segment_paths[i], 'rb') as f_src: shutil.copyfileobj(f_src, f_dest)
-                
-                final_temp_path = self._extract_flac(merged_path)
-                self.fn_logger.info(f"Path A SUCCESS: MAX quality track processed for {track_info_str}")
-
-            except Exception as e:
-                # Path B: Fallback to CD quality
-                self.fn_logger.info(f"Path A FAILED (Reason: {e}). Falling back to CD quality...")
-                try:
-                    if not stream_manifest: raise ValueError("Stream manifest not available for CD quality fallback.")
-                    download_url = stream_manifest.urls[0]
-                    final_temp_path = temp_dir_path / f"{media.id}.flac"
-                    check, err = DownloadTool(str(final_temp_path), [download_url]).start(True)
-                    if not check: raise Exception(f"CD quality download failed: {err}")
-                    self.fn_logger.info(f"Path B SUCCESS: CD quality track downloaded for {track_info_str}")
-                except Exception as e_cd:
-                    self.fn_logger.error(f"FATAL: Fallback for CD quality also failed. Final error: {e_cd}")
-                    return False
-
-            if final_temp_path and final_temp_path.exists():
-                # The one and only place where metadata is written:
-                self._write_metadata_with_aigpy(media, final_temp_path)
-                shutil.move(final_temp_path, path_media_dst)
-                return True
-            return False
 
     def _handle_metadata_and_extras(
         self,
@@ -1092,37 +1069,32 @@ class Download:
         is_parent_album: bool,
         media_stream: Stream | None,
     ) -> None:
-        """[DEPRECATED FOR AUDIO] This function is now completely bypassed for audio tracks."""
-        if isinstance(media, Track):
-            return
+        """Handle metadata, lyrics, and cover processing.
 
-        # 视频文件的逻辑保持不变 (因为视频下载仍然使用旧流程)
+        Args:
+            media (Track | Video): Media item.
+            tmp_path_file (pathlib.Path): Temporary file path.
+            path_media_dst (pathlib.Path): Destination file path.
+            is_parent_album (bool): Whether this is a parent album.
+            media_stream (Stream | None): Media stream.
+        """
         if isinstance(media, Video):
             return
-        
-        # Our new audio download logic places the final file at `path_media_dst`.
-        # The `tmp_path_file` is now irrelevant for audio tracks.
-        # We must call the original metadata writer on the final path.
-        # However, our new logic does not produce a `media_stream` object, which is needed for replay gain tags.
-        # We will create a dummy `media_stream` to call the function without error,
-        # but replay gain information will be missing. This is a compromise for integration.
-        if media_stream is None:
-            self.fn_logger.warning(f"media_stream not available for '{name_builder_item(media)}'. "
-                                   f"Metadata will be written without replay_gain info.")
-            # Create a dummy stream object to satisfy the function signature
-            media_stream = Stream(
-                codecs="", mime_type="", file_extension="", urls=[],
-                album_peak_amplitude=0.0, album_replay_gain=0.0,
-                track_peak_amplitude=0.0, track_replay_gain=0.0,
-                is_encrypted=False, encryption_key=""
+
+        tmp_path_lyrics: pathlib.Path | None = None
+        tmp_path_cover: pathlib.Path | None = None
+
+        # Write metadata to file.
+        if media_stream:
+            result_metadata, tmp_path_lyrics, tmp_path_cover = self.metadata_write(
+                media, tmp_path_file, is_parent_album, media_stream
             )
 
-        result_metadata, tmp_path_lyrics, tmp_path_cover = self.metadata_write(
-            media, path_media_dst, is_parent_album, media_stream
-        )
-
+        # Move lyrics file
         if self.settings.data.lyrics_file and tmp_path_lyrics:
             self._move_lyrics(tmp_path_lyrics, path_media_dst)
+
+        # Move cover file
         if self.settings.data.cover_album_file and tmp_path_cover:
             self._move_cover(tmp_path_cover, path_media_dst)
 
@@ -1313,7 +1285,7 @@ class Download:
         Returns:
             str: Path to the temp file.
         """
-        return self.write_to_tmp_file(dir_destination, mode="w", content=lyrics)
+        return self.write_to_tmp_file(dir_destination, mode="x", content=lyrics)
 
     def cover_to_file(self, dir_destination: pathlib.Path, image: bytes) -> str:
         """Write cover image to a temporary file.
@@ -1347,7 +1319,7 @@ class Download:
         except:
             result = ""
 
-        return str(result)
+        return result
 
     @staticmethod
     def cover_data(url: str | None = None, path_file: str | None = None) -> str | bytes:
@@ -1370,8 +1342,7 @@ class Download:
                 # TODO: Implement propper logging.
                 print(e)
             finally:
-                if 'response' in locals():
-                    response.close()
+                response.close()
         elif path_file:
             try:
                 with open(path_file, "rb") as f:
@@ -1444,6 +1415,7 @@ class Download:
 
             path_cover = self.cover_to_file(path_media.parent, cover_data_album_file)
 
+        # `None` values are not allowed.
         m: Metadata = Metadata(
             path_file=path_media,
             lyrics=lyrics,
@@ -1608,29 +1580,30 @@ class Download:
         result_dirs: list[pathlib.Path] = []
 
         # Iterate through list items
-        with futures.ThreadPoolExecutor(max_workers=self.settings.data.downloads_concurrent_max) as executor:
-            # Dispatch all download tasks to worker threads
-            download_futures: list[futures.Future] = [
-                executor.submit(
-                    self.item,
-                    media=item_media,
-                    file_template=file_name_relative,
-                    quality_audio=quality_audio,
-                    quality_video=quality_video,
-                    download_delay=download_delay,
-                    is_parent_album=is_album,
-                    list_position=count + 1,
-                    list_total=list_total,
-                )
-                for count, item_media in enumerate(items)
-            ]
+        while not progress.finished:
+            with futures.ThreadPoolExecutor(max_workers=self.settings.data.downloads_concurrent_max) as executor:
+                # Dispatch all download tasks to worker threads
+                download_futures: list[futures.Future] = [
+                    executor.submit(
+                        self.item,
+                        media=item_media,
+                        file_template=file_name_relative,
+                        quality_audio=quality_audio,
+                        quality_video=quality_video,
+                        download_delay=download_delay,
+                        is_parent_album=is_album,
+                        list_position=count + 1,
+                        list_total=list_total,
+                    )
+                    for count, item_media in enumerate(items)
+                ]
 
-            # Process download results
-            result_dirs = self._process_download_futures(download_futures, progress, progress_task, progress_stdout)
+                # Process download results
+                result_dirs = self._process_download_futures(download_futures, progress, progress_task, progress_stdout)
 
-            # Check for abort signal
-            if self.event_abort.is_set():
-                return result_dirs
+                # Check for abort signal
+                if self.event_abort.is_set():
+                    return result_dirs
 
         return result_dirs
 

@@ -180,13 +180,9 @@ class TagTool(object):
         
         tags.save(self.path)
 
-    # ▼▼▼【最终修复版 METADATA 写入函数】▼▼▼
     def __save_flac__(self, cover_path=None, cover_data=None):
-        # 步骤 1: 只打开文件一次
         tags = FLAC(self.path)
-        tags.delete() # 清理旧标签，确保干净
         
-        # 步骤 2: 写入所有文本元数据
         if self.title: tags["TITLE"] = self.title
         if self.album: tags["ALBUM"] = self.album
         if self.artist: tags["ARTIST"] = self.artist if isinstance(self.artist, list) else [self.artist]
@@ -201,39 +197,20 @@ class TagTool(object):
         if self.isrc: tags["ISRC"] = self.isrc
         if self.lyrics: tags["LYRICS"] = self.lyrics
 
-        # 步骤 3: 处理封面
-        # 如果上层代码直接传递了URL (cover_path)，就在这里下载
-        if not cover_data and cover_path:
-            if cover_path.startswith('http'):
-                cover_data = None # 关键保护：先将变量设为None
-                try:
-                    # 从URL下载封面数据
-                    print(f"[AIGPY TagTool] Downloading cover from URL: {cover_path}")
-                    cover_data = requests.get(cover_path, timeout=20).content
-                except Exception as e:
-                    print(f"[AIGPY TagTool] Failed to download cover: {e}")
-            else:
-                try:
-                    # 从本地文件路径读取
-                    with open(cover_path, "rb") as f:
-                        cover_data = f.read()
-                except Exception as e:
-                    print(f"[AIGPY TagTool] Failed to read cover file: {e}")
+        tags.save(self.path)
 
-        # 步骤 4: 嵌入封面（如果封面数据存在）
+        if not cover_data and cover_path:
+            with open(cover_path, "rb") as f:
+                cover_data = f.read()
         if cover_data:
+            audio = FLAC(self.path)
             image = Picture()
             image.data = cover_data
             image.type = 3
             image.mime = u"image/jpeg"
-            # 核心修复：手动设置封面宽高，解决 Invalid resolution 错误
-            image.width = 1280
-            image.height = 1280
-            tags.clear_pictures()
-            tags.add_picture(image)
-
-        # 步骤 5: 一次性保存所有更改
-        tags.save()
+            audio.clear_pictures()
+            audio.add_picture(image)
+            audio.save()
             
 # --- END OF INCLUDED AIGPY CODE ---
 
@@ -248,7 +225,6 @@ Classes:
     Download: Main class for managing downloads, segment merging, file operations, and metadata.
 """
 # Original imports start here
-import json
 import pathlib
 import random
 import tempfile
@@ -795,6 +771,15 @@ class Download:
         )
 
         # Step 5: Post-processing
+        if download_success and not skip_download:
+             self._handle_metadata_and_extras(
+                 media=media,
+                 tmp_path_file=path_media_dst,
+                 path_media_dst=path_media_dst,
+                 is_parent_album=is_parent_album,
+                 media_stream=None,
+             )
+        
         self._perform_post_processing(
             media,
             path_media_dst,
@@ -976,49 +961,19 @@ class Download:
         if skip_download:
             return True
 
-        # Get stream information and final file extension
+        # The new logic completely replaces the original flow for audio, so we bypass _get_stream_info
+        # For videos, the original flow is still used inside _perform_actual_download
         stream_manifest, file_extension, do_flac_extract, media_stream = self._get_stream_info(media)
 
-        if stream_manifest is None and isinstance(media, Track):
-            return False
-
-        # Update path if extension changed
-        if path_media_dst.suffix != file_extension:
-            path_media_dst = path_media_dst.with_suffix(file_extension)
-            path_media_dst = pathlib.Path(path_file_sanitize(path_media_dst, adapt=True))
+        # Ensure destination path has correct extension for audio, as our method is deterministic
+        if isinstance(media, Track) and path_media_dst.suffix.lower() != '.flac':
+             path_media_dst = path_media_dst.with_suffix('.flac')
 
         os.makedirs(path_media_dst.parent, exist_ok=True)
-
-        # Perform actual download
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_path_dir:
-            tmp_path_file: pathlib.Path = pathlib.Path(tmp_path_dir) / str(uuid4())
-            tmp_path_file.touch()
-
-            # The actual download, including segment merging and decryption, happens here.
-            result_download, tmp_path_file = self._download(
-                media=media, stream_manifest=stream_manifest, path_file=tmp_path_file
-            )
-
-            # Move file to final destination if download succeeded
-            if result_download:
-                if isinstance(media, Track):
-                    # If FLAC needs to be extracted, do so. This can also happen with MQA.
-                    if do_flac_extract:
-                        tmp_path_file = self._extract_flac(tmp_path_file)
-                elif isinstance(media, Video):
-                    # Convert video to MP4
-                    if self.settings.data.video_convert_mp4:
-                        tmp_path_file = self._video_convert(tmp_path_file)
-
-                # Add metadata to file
-                self._handle_metadata_and_extras(media, tmp_path_file, path_media_dst, is_parent_album, media_stream)
-
-                self.fn_logger.info(f"Downloaded item '{name_builder_item(media)}'.")
-                shutil.move(tmp_path_file, path_media_dst)
-
-                return True
-            else:
-                return False
+        # Call our new main download function directly. The other arguments are now obsolete for audio.
+        return self._perform_actual_download(
+            media, path_media_dst, stream_manifest, do_flac_extract, is_parent_album, media_stream
+        )
 
     def _get_stream_info(self, media: Track | Video) -> tuple[StreamManifest | None, str, bool, Stream | None]:
         """Get stream information for media.
@@ -1061,10 +1016,171 @@ class Download:
 
         return stream_manifest, file_extension, do_flac_extract, media_stream
 
+    # ▼▼▼【核心修改: 新增两个辅助函数到Download类】▼▼▼
+    def _get_v1_session(self) -> tidalapi.Session:
+        """安全地创建一个临时的、使用 zU4X... ID 的会话，用于我们的特殊API调用。"""
+        self.fn_logger.info("Initializing temporary V1 session for API call...")
+        config = tidalapi.Config()
+        config.client_id = 'zU4XHVVkc2tDPo4t'
+        config.client_secret = 'VJKhDFqJPqvsPVNBV6ukXTJmwK_H_v_wZC_MAB3oV3c='
+        
+        temp_session = tidalapi.Session(config=config)
+        
+        temp_session.load_oauth_session(
+            token_type=self.session.token_type,
+            access_token=self.session.access_token,
+            refresh_token=self.session.refresh_token,
+            expiry_time=self.session.expiry_time
+        )
+
+        if not temp_session.check_login():
+             self.fn_logger.warning("V1 session token might be expired. Refresh may be needed if request fails.")
+        
+        self.fn_logger.info("Temporary V1 session is active.")
+        return temp_session
+
+    def _parse_dash_manifest(self, xml_string: str) -> list[str]:
+        """解析DASH XML清单，生成完整的URL列表"""
+        self.fn_logger.info("Parsing XML manifest...")
+        namespaces = {'mpd': 'urn:mpeg:dash:schema:mpd:2011'}
+        root = ET.fromstring(xml_string)
+        template = root.find('.//mpd:SegmentTemplate', namespaces)
+        if template is None: raise ValueError("SegmentTemplate tag not found in XML.")
+        init_url = template.get('initialization')
+        media_template_url = template.get('media')
+        start_number = int(template.get('startNumber', 1))
+        timeline = template.find('.//mpd:SegmentTimeline', namespaces)
+        if timeline is None: raise ValueError("SegmentTimeline tag not found in XML.")
+        total_segments = sum(int(s.get('r', 0)) + 1 for s in timeline.findall('mpd:S', namespaces))
+        urls = [init_url] + [media_template_url.replace('$Number$', str(start_number + i)) for i in range(total_segments)]
+        self.fn_logger.info(f"Generated a total of {len(urls)} segment URLs.")
+        return urls
+    # ▲▲▲【新增结束】▲▲▲
+
+    # ▼▼▼【核心修改: 完全替换 _perform_actual_download 方法】▼▼▼
+    def _perform_actual_download(
+        self,
+        media: Track | Video,
+        path_media_dst: pathlib.Path,
+        stream_manifest: StreamManifest | None, 
+        do_flac_extract: bool,
+        is_parent_album: bool,
+        media_stream: Stream | None,
+    ) -> bool:
+        
+        if isinstance(media, Video):
+            self.fn_logger.info(f"Media is a video. Using original download method for '{name_builder_item(media)}'.")
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_path_dir:
+                tmp_path_file: pathlib.Path = pathlib.Path(tmp_path_dir) / str(uuid4())
+                tmp_path_file.touch()
+                result_download, tmp_path_file = self._download(media=media, stream_manifest=stream_manifest, path_file=tmp_path_file)
+                if not result_download: return False
+                if self.settings.data.video_convert_mp4:
+                    tmp_path_file = self._video_convert(tmp_path_file)
+                shutil.move(tmp_path_file, path_media_dst)
+                self.fn_logger.info(f"Downloaded video '{name_builder_item(media)}'.")
+                return True
+        
+        if not isinstance(media, Track):
+            self.fn_logger.error("The new download logic only supports audio tracks and videos.")
+            return False
+
+        track_id = media.id
+        track_info_str = f"{media.name} - {media.artist.name if media.artist else 'Unknown Artist'}"
+        
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            temp_dir_path = pathlib.Path(temp_dir)
+            final_temp_path = None
+            
+            try:
+                # --- 路径 A: 优先尝试获取并处理 MAX 音质 ---
+                self.fn_logger.info(f"Path A: Attempting to fetch MAX quality for: {track_info_str}")
+                
+                v1_session = self._get_v1_session()
+                
+                headers = {'authorization': f'Bearer {v1_session.access_token}', 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.84 Safari/537.36'}
+                params = {"audioquality": "HI_RES", "playbackmode": "STREAM", "assetpresentation": "FULL", "countryCode": "US"}
+                api_url = f'https://api.tidalhifi.com/v1/tracks/{track_id}/playbackinfopostpaywall'
+                response = requests.get(api_url, headers=headers, params=params)
+                response.raise_for_status()
+                data = response.json()
+                if "application/dash+xml" not in data.get('manifestMimeType', ''):
+                    raise ValueError(f"Server did not return expected XML for MAX. Got: {data.get('manifestMimeType', 'N/A')}")
+                
+                self.fn_logger.info("Successfully got MAX XML manifest. Starting segmented download...")
+                xml_data = base64.b64decode(data['manifest']).decode('utf-8')
+                urls = self._parse_dash_manifest(xml_data)
+                
+                self.fn_logger.info(f"Starting parallel download of {len(urls)} segments...")
+                segment_paths = {}
+                with ThreadPoolExecutor(max_workers=self.settings.data.downloads_simultaneous_per_track_max) as executor:
+                    future_to_index = {
+                        executor.submit(DownloadTool(str(temp_dir_path / f"s_{i:04d}.mp4"), [url]).start, False): i
+                        for i, url in enumerate(urls)
+                    }
+                    for future in as_completed(future_to_index):
+                        index = future_to_index[future]
+                        check, err = future.result()
+                        if not check: raise Exception(f"Segment {index} download failed: {err}")
+                        segment_paths[index] = temp_dir_path / f"s_{index:04d}.mp4"
+                self.fn_logger.info("All segments downloaded successfully.")
+                
+                self.fn_logger.info("Merging files...")
+                merged_path = temp_dir_path / "merged.mp4"
+                with open(merged_path, 'wb') as f_dest:
+                    for i in range(len(urls)):
+                        segment_path = segment_paths.get(i)
+                        if not segment_path: raise FileNotFoundError(f"Missing segment {i}")
+                        with open(segment_path, 'rb') as f_src: shutil.copyfileobj(f_src, f_dest)
+                
+                final_temp_path = self._extract_flac(merged_path)
+                if not final_temp_path or not final_temp_path.exists(): raise Exception("FLAC extraction failed.")
+                self.fn_logger.info(f"Path A SUCCESS: MAX quality track processed for {track_info_str}")
+
+            except Exception as e:
+                # --- 路径 B: MAX获取失败，自动回退到 CD 音质 ---
+                self.fn_logger.info(f"Path A FAILED (Reason: {e}). Falling back to CD quality...")
+                try:
+                    if 'v1_session' not in locals(): v1_session = self._get_v1_session()
+                    headers = {'authorization': f'Bearer {v1_session.access_token}', 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.84 Safari/537.36'}
+                    params = {"audioquality": "LOSSLESS", "playbackmode": "STREAM", "assetpresentation": "FULL", "countryCode": "US"}
+                    api_url = f'https://api.tidalhifi.com/v1/tracks/{track_id}/playbackinfopostpaywall'
+                    response = requests.get(api_url, headers=headers, params=params)
+                    response.raise_for_status()
+                    data = response.json()
+                    if "vnd.tidal.bt" not in data.get('manifestMimeType', ''):
+                        raise ValueError(f"Fallback failed, server did not return JSON for CD. Got: {data.get('manifestMimeType', 'N/A')}")
+                    
+                    manifest_json = json.loads(base64.b64decode(data['manifest']).decode('utf-8'))
+                    download_url = manifest_json['urls'][0]
+                    self.fn_logger.info("Successfully got direct download URL for CD quality.")
+                    
+                    self.fn_logger.info("Starting direct download of complete FLAC file...")
+                    final_temp_path = temp_dir_path / f"{track_id}.flac"
+                    tool = DownloadTool(str(final_temp_path), [download_url])
+                    download_headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.84 Safari/537.36', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate, br', 'Connection': 'keep-alive'}
+                    if hasattr(tool, 'setHeaders'):
+                        tool.setHeaders(download_headers)
+                    check, err = tool.start(True)
+                    if not check: raise Exception(f"CD quality download failed: {err}")
+                    self.fn_logger.info(f"Path B SUCCESS: CD quality track downloaded for {track_info_str}")
+                except Exception as e_cd:
+                    self.fn_logger.error(f"FATAL: Fallback for CD quality also failed. Final error: {e_cd}")
+                    return False
+
+            if final_temp_path and final_temp_path.exists():
+                shutil.move(final_temp_path, path_media_dst)
+                # We return True, and let the original flow handle metadata
+                return True
+            else:
+                self.fn_logger.error(f"Download process for '{track_info_str}' completed but no final file was produced.")
+                return False
+    # ▲▲▲【替换结束】▲▲▲
+
     def _handle_metadata_and_extras(
         self,
         media: Track | Video,
-        tmp_path_file: pathlib.Path,
+        tmp_path_file: pathlib.Path, # This is now obsolete for audio, but kept for video
         path_media_dst: pathlib.Path,
         is_parent_album: bool,
         media_stream: Stream | None,
@@ -1080,21 +1196,30 @@ class Download:
         """
         if isinstance(media, Video):
             return
-
-        tmp_path_lyrics: pathlib.Path | None = None
-        tmp_path_cover: pathlib.Path | None = None
-
-        # Write metadata to file.
-        if media_stream:
-            result_metadata, tmp_path_lyrics, tmp_path_cover = self.metadata_write(
-                media, tmp_path_file, is_parent_album, media_stream
+        
+        # Our new audio download logic places the final file at `path_media_dst`.
+        # The `tmp_path_file` is now irrelevant for audio tracks.
+        # We must call the original metadata writer on the final path.
+        # However, our new logic does not produce a `media_stream` object, which is needed for replay gain tags.
+        # We will create a dummy `media_stream` to call the function without error,
+        # but replay gain information will be missing. This is a compromise for integration.
+        if media_stream is None:
+            self.fn_logger.warning(f"media_stream not available for '{name_builder_item(media)}'. "
+                                   f"Metadata will be written without replay_gain info.")
+            # Create a dummy stream object to satisfy the function signature
+            media_stream = Stream(
+                codecs="", mime_type="", file_extension="", urls=[],
+                album_peak_amplitude=0.0, album_replay_gain=0.0,
+                track_peak_amplitude=0.0, track_replay_gain=0.0,
+                is_encrypted=False, encryption_key=""
             )
 
-        # Move lyrics file
+        result_metadata, tmp_path_lyrics, tmp_path_cover = self.metadata_write(
+            media, path_media_dst, is_parent_album, media_stream
+        )
+
         if self.settings.data.lyrics_file and tmp_path_lyrics:
             self._move_lyrics(tmp_path_lyrics, path_media_dst)
-
-        # Move cover file
         if self.settings.data.cover_album_file and tmp_path_cover:
             self._move_cover(tmp_path_cover, path_media_dst)
 
@@ -1285,7 +1410,7 @@ class Download:
         Returns:
             str: Path to the temp file.
         """
-        return self.write_to_tmp_file(dir_destination, mode="x", content=lyrics)
+        return self.write_to_tmp_file(dir_destination, mode="w", content=lyrics)
 
     def cover_to_file(self, dir_destination: pathlib.Path, image: bytes) -> str:
         """Write cover image to a temporary file.
@@ -1319,7 +1444,7 @@ class Download:
         except:
             result = ""
 
-        return result
+        return str(result)
 
     @staticmethod
     def cover_data(url: str | None = None, path_file: str | None = None) -> str | bytes:
@@ -1342,7 +1467,8 @@ class Download:
                 # TODO: Implement propper logging.
                 print(e)
             finally:
-                response.close()
+                if 'response' in locals():
+                    response.close()
         elif path_file:
             try:
                 with open(path_file, "rb") as f:
@@ -1407,15 +1533,12 @@ class Download:
             cover_data = self.cover_data(url=url_cover)
 
         if cover_data and self.settings.data.cover_album_file and is_parent_album:
-            if cover_dimension == CoverDimensions.PxORIGIN:
-                url_cover_album_file = track.album.image(CoverDimensions.PxORIGIN)
-                cover_data_album_file = self.cover_data(url=url_cover_album_file)
-            else:
-                cover_data_album_file = cover_data
-
+            # 修正逻辑：当需要保存独立的封面文件时，直接复用之前下载的封面数据。
+            # 之前的逻辑已经处理了 ORIGIN 回退到 1280 的情况，所以 cover_data 中已是最高质量的图片。
+            # 这不仅修复了 ORIGIN 尺寸的错误，也避免了不必要的重复下载。
+            cover_data_album_file = cover_data
             path_cover = self.cover_to_file(path_media.parent, cover_data_album_file)
 
-        # `None` values are not allowed.
         m: Metadata = Metadata(
             path_file=path_media,
             lyrics=lyrics,
@@ -1580,30 +1703,29 @@ class Download:
         result_dirs: list[pathlib.Path] = []
 
         # Iterate through list items
-        while not progress.finished:
-            with futures.ThreadPoolExecutor(max_workers=self.settings.data.downloads_concurrent_max) as executor:
-                # Dispatch all download tasks to worker threads
-                download_futures: list[futures.Future] = [
-                    executor.submit(
-                        self.item,
-                        media=item_media,
-                        file_template=file_name_relative,
-                        quality_audio=quality_audio,
-                        quality_video=quality_video,
-                        download_delay=download_delay,
-                        is_parent_album=is_album,
-                        list_position=count + 1,
-                        list_total=list_total,
-                    )
-                    for count, item_media in enumerate(items)
-                ]
+        with futures.ThreadPoolExecutor(max_workers=self.settings.data.downloads_concurrent_max) as executor:
+            # Dispatch all download tasks to worker threads
+            download_futures: list[futures.Future] = [
+                executor.submit(
+                    self.item,
+                    media=item_media,
+                    file_template=file_name_relative,
+                    quality_audio=quality_audio,
+                    quality_video=quality_video,
+                    download_delay=download_delay,
+                    is_parent_album=is_album,
+                    list_position=count + 1,
+                    list_total=list_total,
+                )
+                for count, item_media in enumerate(items)
+            ]
 
-                # Process download results
-                result_dirs = self._process_download_futures(download_futures, progress, progress_task, progress_stdout)
+            # Process download results
+            result_dirs = self._process_download_futures(download_futures, progress, progress_task, progress_stdout)
 
-                # Check for abort signal
-                if self.event_abort.is_set():
-                    return result_dirs
+            # Check for abort signal
+            if self.event_abort.is_set():
+                return result_dirs
 
         return result_dirs
 

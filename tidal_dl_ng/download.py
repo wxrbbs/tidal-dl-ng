@@ -184,7 +184,9 @@ class TagTool(object):
 
     def __save_flac__(self, cover_path=None, cover_data=None):
         tags = FLAC(self.path)
-        
+        tags.delete()
+
+        # ... (这里写入文本标签的代码保持不变)
         if self.title: tags["TITLE"] = self.title
         if self.album: tags["ALBUM"] = self.album
         if self.artist: tags["ARTIST"] = self.artist if isinstance(self.artist, list) else [self.artist]
@@ -201,16 +203,32 @@ class TagTool(object):
 
         tags.save(self.path)
 
+        # ▼▼▼【核心修改】▼▼▼
+        # 如果没有直接提供cover_data，并且cover_path存在
         if not cover_data and cover_path:
-            with open(cover_path, "rb") as f:
-                cover_data = f.read()
+            # 判断 cover_path 是不是一个URL
+            if cover_path.startswith('http'):
+                try:
+                    # 如果是URL，就用requests下载它
+                    print(f"[AIGPY TagTool] Downloading cover from URL: {cover_path}")
+                    cover_data = requests.get(cover_path, timeout=20).content
+                except Exception as e:
+                    print(f"[AIGPY TagTool] Failed to download cover: {e}")
+            else:
+                try:
+                    # 如果不是URL，就按原样当作本地文件路径打开
+                    with open(cover_path, "rb") as f:
+                        cover_data = f.read()
+                except Exception as e:
+                    print(f"[AIGPY TagTool] Failed to read cover file: {e}")
+        # ▲▲▲【修改结束】▲▲▲
+
         if cover_data:
             audio = FLAC(self.path)
             image = Picture()
             image.data = cover_data
             image.type = 3
             image.mime = u"image/jpeg"
-            # 【修复点】手动设置宽高，解决1280x1280封面写入失败问题
             image.width = 1280
             image.height = 1280
             audio.clear_pictures()
@@ -933,7 +951,7 @@ class Download:
                 tag_tool.date = track.album.release_date.strftime('%Y-%m-%d')
             
             cover_url = track.album.image(1280)
-            cover_data = self.cover_data(url=cover_url)
+            tag_tool.save(cover_path=cover_url) # <--- 修改这一行，传递 cover_url
             
             tag_tool.save(cover_data=cover_data)
             self.fn_logger.info("AIGPY: Metadata and cover art written successfully.")

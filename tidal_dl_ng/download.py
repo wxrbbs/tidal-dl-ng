@@ -225,6 +225,7 @@ Classes:
     Download: Main class for managing downloads, segment merging, file operations, and metadata.
 """
 # Original imports start here
+import json
 import pathlib
 import random
 import tempfile
@@ -1197,22 +1198,9 @@ class Download:
         if isinstance(media, Video):
             return
         
-        # Our new audio download logic places the final file at `path_media_dst`.
-        # The `tmp_path_file` is now irrelevant for audio tracks.
-        # We must call the original metadata writer on the final path.
-        # However, our new logic does not produce a `media_stream` object, which is needed for replay gain tags.
-        # We will create a dummy `media_stream` to call the function without error,
-        # but replay gain information will be missing. This is a compromise for integration.
         if media_stream is None:
             self.fn_logger.warning(f"media_stream not available for '{name_builder_item(media)}'. "
-                                   f"Metadata will be written without replay_gain info.")
-            # Create a dummy stream object to satisfy the function signature
-            media_stream = Stream(
-                codecs="", mime_type="", file_extension="", urls=[],
-                album_peak_amplitude=0.0, album_replay_gain=0.0,
-                track_peak_amplitude=0.0, track_replay_gain=0.0,
-                is_encrypted=False, encryption_key=""
-            )
+                                   f"ReplayGain metadata will not be written.")
 
         result_metadata, tmp_path_lyrics, tmp_path_cover = self.metadata_write(
             media, path_media_dst, is_parent_album, media_stream
@@ -1480,7 +1468,7 @@ class Download:
         return result
 
     def metadata_write(
-        self, track: Track, path_media: pathlib.Path, is_parent_album: bool, media_stream: Stream
+        self, track: Track, path_media: pathlib.Path, is_parent_album: bool, media_stream: Stream | None
     ) -> tuple[bool, pathlib.Path | None, pathlib.Path | None]:
         """Write metadata, lyrics, and cover to a media file.
 
@@ -1488,7 +1476,7 @@ class Download:
             track (Track): Track object.
             path_media (pathlib.Path): Path to media file.
             is_parent_album (bool): Whether this is a parent album.
-            media_stream (Stream): Stream object.
+            media_stream (Stream | None): Stream object, or None if not available.
 
         Returns:
             tuple[bool, pathlib.Path | None, pathlib.Path | None]: (Success, path to lyrics, path to cover)
@@ -1506,38 +1494,37 @@ class Download:
         lyrics: str = ""
         cover_data: bytes = None
 
+        # Prepare gain info ONLY if media_stream is available and settings allow it
+        should_write_gain = media_stream is not None and self.settings.data.metadata_replay_gain
+        album_gain = media_stream.album_replay_gain if media_stream else 0.0
+        album_peak = media_stream.album_peak_amplitude if media_stream else 0.0
+        track_gain = media_stream.track_replay_gain if media_stream else 0.0
+        track_peak = media_stream.track_peak_amplitude if media_stream else 0.0
+
         if self.settings.data.lyrics_embed or self.settings.data.lyrics_file:
-            # Try to retrieve lyrics.
             try:
                 lyrics_obj = track.lyrics()
-
                 if lyrics_obj.subtitles:
                     lyrics = lyrics_obj.subtitles
                 elif lyrics_obj.text:
                     lyrics = lyrics_obj.text
             except:
                 lyrics = ""
-                # TODO: Implement proper logging.
                 print(f"Could not retrieve lyrics for `{name_builder_item(track)}`.")
 
         if lyrics and self.settings.data.lyrics_file:
             path_lyrics = self.lyrics_to_file(path_media.parent, lyrics)
 
         cover_dimension = self.settings.data.metadata_cover_dimension
-
         if self.settings.data.metadata_cover_embed or (self.settings.data.cover_album_file and is_parent_album):
-            # Do not write CoverDimensions.PxORIGIN to metadata, since it can exceed max metadata file size (>16Mb)
             url_cover = track.album.image(
                 int(cover_dimension) if cover_dimension != CoverDimensions.PxORIGIN else int(CoverDimensions.Px1280)
             )
             cover_data = self.cover_data(url=url_cover)
 
+        # Simplified and corrected cover file saving
         if cover_data and self.settings.data.cover_album_file and is_parent_album:
-            # 修正逻辑：当需要保存独立的封面文件时，直接复用之前下载的封面数据。
-            # 之前的逻辑已经处理了 ORIGIN 回退到 1280 的情况，所以 cover_data 中已是最高质量的图片。
-            # 这不仅修复了 ORIGIN 尺寸的错误，也避免了不必要的重复下载。
-            cover_data_album_file = cover_data
-            path_cover = self.cover_to_file(path_media.parent, cover_data_album_file)
+            path_cover = self.cover_to_file(path_media.parent, cover_data)
 
         m: Metadata = Metadata(
             path_file=path_media,
@@ -1554,12 +1541,12 @@ class Download:
             totaldisc=track.album.num_volumes if track.album and track.album.num_volumes else 1,
             discnumber=track.volume_num if track.volume_num else 1,
             cover_data=cover_data if self.settings.data.metadata_cover_embed else None,
-            album_replay_gain=media_stream.album_replay_gain,
-            album_peak_amplitude=media_stream.album_peak_amplitude,
-            track_replay_gain=media_stream.track_replay_gain,
-            track_peak_amplitude=media_stream.track_peak_amplitude,
+            album_replay_gain=album_gain,
+            album_peak_amplitude=album_peak,
+            track_replay_gain=track_gain,
+            track_peak_amplitude=track_peak,
             url_share=track.share_url if track.share_url and self.settings.data.metadata_write_url else "",
-            replay_gain_write=self.settings.data.metadata_replay_gain,
+            replay_gain_write=should_write_gain, # Use our new safe flag
             upc=track.album.upc if track.album and track.album.upc else "",
         )
 
@@ -1568,7 +1555,7 @@ class Download:
         result = True
 
         return result, path_lyrics, path_cover
-
+        
     def items(
         self,
         file_template: str,

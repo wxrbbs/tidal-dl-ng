@@ -175,6 +175,22 @@ Long answer: See [here](https://github.com/exislow/tidal-dl-ng/issues/231)
 
 Your `path_binary_ffmpeg` is probably wrong. Please read over and over again the help of this particular option until you get it right what path to put for `path_binary_ffmpeg`.
 
+### My Linux (e.g. Ubuntu) complains that `libxcb-cursor0` is not installed
+
+Simply install this dependency using your OS specific package manager.
+
+Ubuntu / Debian
+
+```bash
+sudo apt install libxcb-cursor0
+```
+
+### A terminal is flashing when I run this app on Windows
+
+Please see this isse [#103](https://github.com/exislow/tidal-dl-ng/issues/103).
+
+This is due to the Python `ffmpeg` library which is used and only happens on windows if `extract_flac` is activated.
+
 ## ‼️ Disclaimer
 
 - For educational purposes only. I am not liable and responsible for any damage that happens.
